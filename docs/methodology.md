@@ -143,6 +143,13 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `throughput_summary.csv` (per-fuzzer tx/s and gas/s distribution summary)
   - `progress_metrics_samples.csv` (raw fuzzer-native progress metrics such as seq/s, coverage proxy, corpus size, favored items, failure rate when available)
   - `progress_metrics_summary.csv` (per-fuzzer distribution summary of those progress metrics)
+  - `differential_coverage_relscores.csv` (relscore values computed from AFL showmap campaign directories found under uploaded logs)
+
+### Differential coverage
+
+- Foundry runs emit AFL `showmap`-style coverage files under the uploaded log artifact when the installed `forge` supports `forge test --showmap-out`.
+- Analysis scans `showmap/<approach>/*.txt` campaign trees in logs, reads covered edge IDs with positive hit counts, and computes relscore using the differential-coverage formula.
+- `SCFUZZBENCH_FOUNDRY_SHOWMAP=0` disables Foundry showmap collection. `FOUNDRY_SHOWMAP_DOMAIN` and `FOUNDRY_SHOWMAP_CORPUS_DIR` are passed through to Foundry when set.
 
 ### Cumulative conversion (`analysis/events_to_cumulative.py`)
 

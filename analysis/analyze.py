@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
@@ -1545,6 +1545,94 @@ def write_exclusive_csv(events: Iterable[Event], out_path: Path) -> None:
                 writer.writerow([fuzzer, event])
 
 
+def read_afl_showmap(path: Path) -> set[str]:
+    edges: set[str] = set()
+    for line_number, raw_line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        edge_id, sep, count_text = line.partition(":")
+        if not sep:
+            raise ValueError(f"invalid AFL showmap line {path}:{line_number}: {line}")
+        try:
+            count = int(count_text)
+        except ValueError as exc:
+            raise ValueError(f"invalid AFL showmap count {path}:{line_number}: {line}") from exc
+        if count > 0:
+            edges.add(edge_id)
+    return edges
+
+
+def discover_showmap_campaigns(logs_dir: Path) -> List[Path]:
+    campaigns: set[Path] = set()
+    for showmap_dir in logs_dir.rglob("showmap"):
+        if not showmap_dir.is_dir():
+            continue
+        if any(child.is_dir() for child in showmap_dir.iterdir()):
+            campaigns.add(showmap_dir)
+    return sorted(campaigns)
+
+
+def load_showmap_campaign(campaign_dir: Path) -> Dict[str, Dict[str, set[str]]]:
+    campaign: Dict[str, Dict[str, set[str]]] = {}
+    for approach_dir in sorted(p for p in campaign_dir.iterdir() if p.is_dir()):
+        trials: Dict[str, set[str]] = {}
+        for trial_file in sorted(approach_dir.rglob("*.txt")):
+            edges = read_afl_showmap(trial_file)
+            if edges:
+                trial_id = str(trial_file.relative_to(approach_dir).with_suffix(""))
+                trials[trial_id] = edges
+        if trials:
+            campaign[approach_dir.name] = trials
+    return campaign
+
+
+def calculate_relscores(
+    campaign: Mapping[str, Mapping[str, set[str]]]
+) -> Dict[str, float]:
+    all_edges = set().union(
+        *(edges for trials in campaign.values() for edges in trials.values())
+    )
+    scores: Dict[str, float] = {}
+    for approach, trials in campaign.items():
+        non_empty_trials = [edges for edges in trials.values() if edges]
+        if not non_empty_trials:
+            scores[approach] = 0.0
+            continue
+        score = 0.0
+        for edge in all_edges:
+            approaches_missing_edge = sum(
+                1
+                for other_trials in campaign.values()
+                if not any(edge in edges for edges in other_trials.values())
+            )
+            trials_that_hit_edge = sum(1 for edges in non_empty_trials if edge in edges)
+            score += approaches_missing_edge * trials_that_hit_edge / len(non_empty_trials)
+        scores[approach] = score
+    return scores
+
+
+def write_differential_coverage_relscores_csv(logs_dir: Path, out_path: Path) -> None:
+    rows: List[Tuple[str, str, float, int, int]] = []
+    for campaign_dir in discover_showmap_campaigns(logs_dir):
+        campaign = load_showmap_campaign(campaign_dir)
+        if len(campaign) < 2:
+            continue
+        relscores = calculate_relscores(campaign)
+        campaign_name = str(campaign_dir.relative_to(logs_dir))
+        for approach, score in sorted(relscores.items(), key=lambda item: (-item[1], item[0])):
+            trial_count = len(campaign[approach])
+            edge_count = len(set().union(*campaign[approach].values()))
+            rows.append((campaign_name, approach, score, trial_count, edge_count))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["campaign", "approach", "relscore", "trials", "covered_edges"])
+        for campaign, approach, score, trials, covered_edges in rows:
+            writer.writerow([campaign, approach, f"{score:.6f}", trials, covered_edges])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze scfuzzbench logs.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1619,6 +1707,7 @@ def main() -> int:
         throughput_summary_csv = out_dir / "throughput_summary.csv"
         progress_metrics_samples_csv = out_dir / "progress_metrics_samples.csv"
         progress_metrics_summary_csv = out_dir / "progress_metrics_summary.csv"
+        differential_coverage_relscores_csv = out_dir / "differential_coverage_relscores.csv"
         write_events_csv(events, events_csv)
         write_summary_csv(events, summary_csv)
         write_overlap_csv(events, overlap_csv)
@@ -1630,6 +1719,9 @@ def main() -> int:
         )
         write_progress_metrics_summary_csv(
             progress_metrics_samples, progress_metrics_summary_csv
+        )
+        write_differential_coverage_relscores_csv(
+            args.logs_dir, differential_coverage_relscores_csv
         )
         return 0
     return 1
