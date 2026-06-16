@@ -217,14 +217,7 @@ def parse_timestamp(line: str) -> Optional[float]:
     try:
         dt = datetime.fromisoformat(ts)
     except ValueError:
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(ts, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            return None
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
