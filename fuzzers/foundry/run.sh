@@ -50,9 +50,20 @@ if [[ -n "${FOUNDRY_THREADS:-}" ]]; then
   fi
 fi
 
+forge_cmd=(forge test --mc CryticToFoundry "${extra_args[@]}")
+if [[ -n "${FOUNDRY_SAMPLY_DIR:-}" ]]; then
+  mkdir -p "${FOUNDRY_SAMPLY_DIR}"
+  samply_args=(--save-only --presymbolicate --output "${FOUNDRY_SAMPLY_DIR}/profile-foundry.json.gz")
+  if [[ -n "${FOUNDRY_SAMPLY_ARGS:-}" ]]; then
+    read -r -a configured_samply_args <<< "${FOUNDRY_SAMPLY_ARGS}"
+    samply_args=("${configured_samply_args[@]}" "${samply_args[@]}")
+  fi
+  forge_cmd=(samply record "${samply_args[@]}" "${forge_cmd[@]}")
+fi
+
 set +e
 pushd "${repo_dir}" >/dev/null
-run_with_timeout "${log_file}" forge test --mc CryticToFoundry "${extra_args[@]}"
+run_with_timeout "${log_file}" "${forge_cmd[@]}"
 exit_code=$?
 popd >/dev/null
 set -e
