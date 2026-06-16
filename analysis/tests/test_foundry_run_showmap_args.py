@@ -8,10 +8,30 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "fuzzers" / "foundry" / "run.sh"
 
 
-def write_common_sh(tmp_dir: Path, *, include_timeout: bool = False) -> Path:
+def write_common_sh(
+    tmp_dir: Path,
+    *,
+    include_timeout: bool = False,
+    main_exit_code: int = 0,
+    record_upload: bool = False,
+) -> Path:
     timeout_line = (
         '    printf \'\\t%s\' "${SCFUZZBENCH_TIMEOUT_SECONDS}"\n'
         if include_timeout
+        else ""
+    )
+    upload_body = (
+        "printf 'UPLOAD\\n' >> \"${SCFUZZBENCH_LOG_DIR}/commands.tsv\""
+        if record_upload
+        else ":"
+    )
+    main_exit_block = (
+        f"""
+  if [[ "${{log_file}}" == *foundry.log ]]; then
+    set -e
+    return {main_exit_code}
+  fi"""
+        if main_exit_code
         else ""
     )
     common_sh = tmp_dir / "common.sh"
@@ -24,14 +44,16 @@ apply_benchmark_type() {{ :; }}
 build_target() {{ :; }}
 set_default_worker_env() {{ :; }}
 log() {{ printf '%s\\n' "$*" >> "${{SCFUZZBENCH_LOG_DIR}}/log.txt"; }}
-upload_results() {{ :; }}
+upload_results() {{ {upload_body}; }}
 run_with_timeout() {{
+  log_file=$1
   {{
     printf 'RUN'
 {timeout_line}
     for arg in "$@"; do printf '\\t%s' "$arg"; done
     printf '\\n'
   }} >> "${{SCFUZZBENCH_LOG_DIR}}/commands.tsv"
+{main_exit_block}
   return 0
 }}
 """,
@@ -150,6 +172,33 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
         explicit_override = run_case("86400", "42")
         self.assertEqual(explicit_override[0][1], "86400")
         self.assertEqual(explicit_override[1][1], "42")
+
+    def test_showmap_and_upload_run_after_main_forge_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            log_dir = tmp_dir / "logs"
+            work_dir = tmp_dir / "work"
+            common_sh = write_common_sh(tmp_dir, main_exit_code=7, record_upload=True)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "SCFUZZBENCH_COMMON_SH": str(common_sh),
+                    "SCFUZZBENCH_WORKDIR": str(work_dir),
+                    "SCFUZZBENCH_LOG_DIR": str(log_dir),
+                    "SCFUZZBENCH_RUN_ID": "bench-trial",
+                    "SCFUZZBENCH_FOUNDRY_SHOWMAP": "1",
+                    "FOUNDRY_LABEL": "foundry-master",
+                }
+            )
+
+            completed = subprocess.run(["bash", str(SCRIPT)], env=env, check=False)
+
+            self.assertEqual(completed.returncode, 7)
+            lines = (log_dir / "commands.tsv").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[-1], "UPLOAD")
+            self.assertIn("foundry.log", lines[0])
+            self.assertIn("foundry_showmap.log", lines[1])
 
 
 if __name__ == "__main__":

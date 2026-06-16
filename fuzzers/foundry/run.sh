@@ -52,8 +52,8 @@ fi
 
 set +e
 pushd "${repo_dir}" >/dev/null
-run_with_timeout "${log_file}" forge test --mc CryticToFoundry "${extra_args[@]}"
-exit_code=$?
+exit_code=0
+run_with_timeout "${log_file}" forge test --mc CryticToFoundry "${extra_args[@]}" || exit_code=$?
 
 showmap_enabled="${SCFUZZBENCH_FOUNDRY_SHOWMAP:-1}"
 if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${showmap_enabled,,}" == "yes" ]]; then

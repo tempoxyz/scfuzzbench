@@ -1571,7 +1571,10 @@ def sanitize_showmap_component(value: str) -> str:
     value = value.strip()
     if not value:
         return "unknown"
-    return re.sub(r"[^A-Za-z0-9_.=-]+", "_", value)
+    sanitized = re.sub(r"[^A-Za-z0-9_.=-]+", "_", value)
+    if sanitized in {".", ".."}:
+        return "unknown"
+    return sanitized
 
 
 def parse_showmap_approach_dir(name: str) -> Tuple[str, str]:
@@ -1759,6 +1762,7 @@ def write_differential_coverage_outputs(
         summary = showmap_campaign_summary(campaign)
         manifest["campaigns"][campaign_name] = summary
         if len(campaign) < 2:
+            # relscore/relcov are comparative; still write single-approach campaigns for inspection.
             continue
         relscores = calculate_relscores(campaign)
         for approach, score in sorted(

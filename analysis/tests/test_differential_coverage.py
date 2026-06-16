@@ -203,6 +203,45 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(scores[("combined", "foundry-master")], "1.000000")
             self.assertEqual(scores[(f"by_test/{suite_name}", "foundry-candidate")], "0.000000")
 
+    def test_parses_real_foundry_showmap_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            showmap_root = root / "logs" / "i-live-foundry-live" / "showmap"
+            invariant_dir = (
+                showmap_root
+                / "foundry-live__test_CryticToFoundry.t.sol_CryticToFoundry"
+            )
+            fuzz_dir = (
+                showmap_root
+                / "foundry-live__test_CryticToFoundry.t.sol_CryticToFoundry__testFuzz_SetNumber"
+            )
+            invariant_dir.mkdir(parents=True)
+            fuzz_dir.mkdir(parents=True)
+            (invariant_dir / "trial-live.txt").write_text("a:1\n", encoding="utf-8")
+            (fuzz_dir / "trial-live.txt").write_text("b:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(root / "logs", out_dir)
+
+            invariant_campaign = (
+                out_dir
+                / "showmap_campaigns"
+                / "by_test"
+                / "test_CryticToFoundry.t.sol_CryticToFoundry"
+                / "foundry-live"
+                / "i-live-foundry-live__trial-live.txt"
+            )
+            fuzz_campaign = (
+                out_dir
+                / "showmap_campaigns"
+                / "by_test"
+                / "test_CryticToFoundry.t.sol_CryticToFoundry__testFuzz_SetNumber"
+                / "foundry-live"
+                / "i-live-foundry-live__trial-live.txt"
+            )
+            self.assertEqual(invariant_campaign.read_text(encoding="utf-8"), "a:1\n")
+            self.assertEqual(fuzz_campaign.read_text(encoding="utf-8"), "b:1\n")
+
     def test_combined_campaign_merges_multiple_raw_foundry_dirs_per_approach(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -270,6 +309,25 @@ class DifferentialCoverageTests(unittest.TestCase):
                 relcovs[("combined", "foundry-candidate", "foundry-master")],
                 "0.333333",
             )
+
+    def test_sanitizes_special_path_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            showmap_root = root / "logs" / "i-live" / "showmap"
+            unsafe_dir = showmap_root / "..__Suite"
+            safe_dir = showmap_root / "candidate__Suite"
+            unsafe_dir.mkdir(parents=True)
+            safe_dir.mkdir(parents=True)
+            (unsafe_dir / "trial-1.txt").write_text("a:1\n", encoding="utf-8")
+            (safe_dir / "trial-1.txt").write_text("b:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(root / "logs", out_dir)
+
+            combined = out_dir / "showmap_campaigns" / "combined"
+            self.assertTrue((combined / "unknown").is_dir())
+            self.assertTrue((combined / "candidate").is_dir())
+            self.assertFalse((out_dir / "showmap_campaigns" / "i-live__trial-1.txt").exists())
 
 
 if __name__ == "__main__":
