@@ -12,6 +12,16 @@ def is_runner_metrics_csv(path: Path) -> bool:
     return "runner_metrics" in name or "runner-metrics" in name
 
 
+def copy_tree_contents(src: Path, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for child in src.iterdir():
+        target = dest / child.name
+        if child.is_dir():
+            shutil.copytree(child, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(child, target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Collect .log files and runner metrics CSVs for analysis."
@@ -27,10 +37,12 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     copied_logs = 0
     copied_metrics = 0
+    copied_showmap_dirs = 0
     for instance_dir in sorted(p for p in args.unzipped_dir.iterdir() if p.is_dir()):
         log_files = list(instance_dir.rglob("*.log"))
         metric_files = [path for path in instance_dir.rglob("*.csv") if is_runner_metrics_csv(path)]
-        if not log_files and not metric_files:
+        showmap_dirs = [path for path in instance_dir.rglob("showmap") if path.is_dir()]
+        if not log_files and not metric_files and not showmap_dirs:
             continue
         dest_instance = args.out_dir / instance_dir.name
         dest_instance.mkdir(parents=True, exist_ok=True)
@@ -59,8 +71,12 @@ def main() -> int:
             shutil.copy2(metric_file, dest_instance / out_name)
             used_metric_names.add(out_name)
             copied_metrics += 1
+        for showmap_dir in showmap_dirs:
+            copy_tree_contents(showmap_dir, dest_instance / "showmap")
+            copied_showmap_dirs += 1
     print(
-        f"Copied {copied_logs} log file(s) and {copied_metrics} runner metrics file(s) to {args.out_dir}"
+        f"Copied {copied_logs} log file(s), {copied_metrics} runner metrics file(s), "
+        f"and {copied_showmap_dirs} showmap tree(s) to {args.out_dir}"
     )
     return 0
 

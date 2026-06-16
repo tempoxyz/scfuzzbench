@@ -117,8 +117,8 @@ make results-analyze-all BUCKET=... RUN_ID=... BENCHMARK_UUID=... DEST=...
 This expands to:
 
 1. Download logs/corpus bundles (`scripts/download_run_artifacts.py`)
-2. Collect `*.log` files into analysis layout (`scripts/prepare_analysis_logs.py`)
-3. Parse events + summaries (`scripts/run_analysis_filtered.py` -> `analysis/analyze.py`)
+2. Collect `*.log` files, runner metrics, and Foundry showmap artifacts into analysis layout (`scripts/prepare_analysis_logs.py`)
+3. Parse events, summaries, and differential coverage artifacts (`scripts/run_analysis_filtered.py` -> `analysis/analyze.py`)
 4. Convert event stream to cumulative series (`analysis/events_to_cumulative.py`)
 5. Build report + charts (`analysis/benchmark_report.py`)
 6. Build broken-invariant overlap artifacts (`analysis/invariant_overlap_report.py`)
@@ -143,6 +143,21 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `throughput_summary.csv` (per-fuzzer tx/s and gas/s distribution summary)
   - `progress_metrics_samples.csv` (raw fuzzer-native progress metrics such as seq/s, coverage proxy, corpus size, favored items, failure rate when available)
   - `progress_metrics_summary.csv` (per-fuzzer distribution summary of those progress metrics)
+  - `differential_coverage_relscores.csv` (relscore values computed from normalized AFL showmap campaigns)
+  - `differential_coverage_relcov.csv` (pairwise relcov values computed from normalized AFL showmap campaigns)
+  - `showmap_campaign_manifest.json` (raw showmap inputs, skipped inputs, and normalized campaign summaries)
+  - `showmap_campaigns/` (canonical `approach/trial.txt` campaign directories used for relscore scoring)
+
+### Differential coverage from Foundry showmap
+
+- Foundry runs emit AFL `showmap`-style coverage files under the uploaded log artifact when the installed `forge` supports `forge test --showmap-out`.
+- Raw Foundry replay output may use `approach__suite/trial.txt` for invariant replay and `approach__suite__test/trial.txt` for fuzz-test replay.
+- `scripts/prepare_analysis_logs.py` preserves uploaded `showmap/` trees beside each prepared instance log directory.
+- Analysis normalizes raw Foundry showmap output into canonical campaign directories before scoring:
+  - `showmap_campaigns/combined/<approach>/<trial>.txt` unions all showmap files for each trial.
+  - `showmap_campaigns/by_test/<suite-test>/<approach>/<trial>.txt` preserves per-test drill-down campaigns.
+- Relscore and relcov are computed through the `differential-coverage` package from normalized AFL showmap campaign directories. Only positive AFL showmap counts are treated as covered edges.
+- `SCFUZZBENCH_FOUNDRY_SHOWMAP=0` disables Foundry showmap collection. `FOUNDRY_SHOWMAP_DOMAIN`, `FOUNDRY_SHOWMAP_CORPUS_DIR`, and `SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS` tune replay behavior.
 
 ### Cumulative conversion (`analysis/events_to_cumulative.py`)
 

@@ -68,6 +68,7 @@ def main() -> int:
     analyze.write_progress_metrics_summary_csv(
         progress_metrics_samples, args.out_dir / "progress_metrics_summary.csv"
     )
+    analyze.write_differential_coverage_outputs(args.logs_dir, args.out_dir, exclude)
     return 0
 
 

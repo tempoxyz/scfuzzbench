@@ -38,6 +38,41 @@ class PrepareAnalysisLogsTests(unittest.TestCase):
             self.assertTrue((prepared_instance / "runner_metrics.csv").exists())
             self.assertFalse((prepared_instance / "logs__runner_metrics.csv").exists())
 
+    def test_copies_showmap_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            showmap_dir = (
+                tmp_dir
+                / "unzipped"
+                / "i-aaa-foundry-master"
+                / "logs"
+                / "showmap"
+                / "foundry-master__Suite__invariant_ok"
+            )
+            showmap_dir.mkdir(parents=True, exist_ok=True)
+            (showmap_dir / "trial-1.txt").write_text("edge_a:1\n", encoding="utf-8")
+
+            out_dir = tmp_dir / "prepared"
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--unzipped-dir",
+                    str(tmp_dir / "unzipped"),
+                    "--out-dir",
+                    str(out_dir),
+                ]
+            )
+
+            prepared_showmap = (
+                out_dir
+                / "i-aaa-foundry-master"
+                / "showmap"
+                / "foundry-master__Suite__invariant_ok"
+                / "trial-1.txt"
+            )
+            self.assertEqual(prepared_showmap.read_text(encoding="utf-8"), "edge_a:1\n")
+
 
 if __name__ == "__main__":
     unittest.main()
