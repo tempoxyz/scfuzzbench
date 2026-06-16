@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import sys
 from collections import defaultdict
@@ -1739,6 +1740,8 @@ def write_differential_coverage_outputs(
     trials, skipped = load_showmap_trials(logs_dir, excluded_fuzzers)
     campaigns = build_showmap_campaigns(trials)
     campaign_root = out_dir / "showmap_campaigns"
+    if campaign_root.exists():
+        shutil.rmtree(campaign_root)
 
     relscore_rows: List[Tuple[str, str, float, int, int]] = []
     relcov_rows: List[Tuple[str, str, str, float]] = []

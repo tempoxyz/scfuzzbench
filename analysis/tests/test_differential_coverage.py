@@ -117,6 +117,41 @@ class DifferentialCoverageTests(unittest.TestCase):
                 (out_dir / "showmap_campaigns" / "combined" / "foundry-candidate").exists()
             )
 
+    def test_clears_stale_showmap_campaigns_on_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master_showmap = root / "logs" / "i-aaa-foundry-master" / "showmap" / "foundry-master"
+            candidate_showmap = (
+                root / "logs" / "i-bbb-foundry-candidate" / "showmap" / "foundry-candidate"
+            )
+            master_showmap.mkdir(parents=True)
+            candidate_showmap.mkdir(parents=True)
+            (master_showmap / "trial-1.txt").write_text("1:1\n2:1\n", encoding="utf-8")
+            (candidate_showmap / "trial-1.txt").write_text("1:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(root / "logs", out_dir)
+            self.assertTrue(
+                (out_dir / "showmap_campaigns" / "combined" / "foundry-candidate").exists()
+            )
+
+            analyze.write_differential_coverage_outputs(
+                root / "logs", out_dir, {"foundry-candidate"}
+            )
+            self.assertTrue(
+                (out_dir / "showmap_campaigns" / "combined" / "foundry-master").exists()
+            )
+            self.assertFalse(
+                (out_dir / "showmap_campaigns" / "combined" / "foundry-candidate").exists()
+            )
+            manifest = json.loads(
+                (out_dir / "showmap_campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                sorted(manifest["campaigns"]["combined"].keys()),
+                ["foundry-master"],
+            )
+
     def test_parses_invariant_showmap_dirs_as_suite_campaigns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -74,9 +74,14 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${show
   fi
   mkdir -p "${showmap_dir}"
   original_timeout="${SCFUZZBENCH_TIMEOUT_SECONDS:-}"
-  if [[ -n "${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS:-}" ]]; then
-    SCFUZZBENCH_TIMEOUT_SECONDS="${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS}"
+  showmap_timeout="${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS:-}"
+  if [[ -z "${showmap_timeout}" ]]; then
+    showmap_timeout=1800
+    if [[ "${original_timeout}" =~ ^[0-9]+$ ]] && [[ "${original_timeout}" -gt 0 ]] && [[ "${original_timeout}" -lt "${showmap_timeout}" ]]; then
+      showmap_timeout="${original_timeout}"
+    fi
   fi
+  SCFUZZBENCH_TIMEOUT_SECONDS="${showmap_timeout}"
   replay_extra_args=()
   skip_showmap_arg_value=0
   for arg in "${extra_args[@]}"; do

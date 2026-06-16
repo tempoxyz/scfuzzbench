@@ -157,7 +157,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `showmap_campaigns/combined/<approach>/<trial>.txt` unions all showmap files for each trial.
   - `showmap_campaigns/by_test/<suite-test>/<approach>/<trial>.txt` preserves per-test drill-down campaigns.
 - Relscore and relcov are computed through the `differential-coverage` package from normalized AFL showmap campaign directories. Only positive AFL showmap counts are treated as covered edges.
-- `SCFUZZBENCH_FOUNDRY_SHOWMAP=0` disables Foundry showmap collection. `FOUNDRY_SHOWMAP_DOMAIN`, `FOUNDRY_SHOWMAP_CORPUS_DIR`, and `SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS` tune replay behavior. When no corpus override is set, showmap replay lets `forge` resolve the corpus directories from the target's Foundry config.
+- `SCFUZZBENCH_FOUNDRY_SHOWMAP=0` disables Foundry showmap collection. `FOUNDRY_SHOWMAP_DOMAIN`, `FOUNDRY_SHOWMAP_CORPUS_DIR`, and `SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS` tune replay behavior. When no corpus override is set, showmap replay lets `forge` resolve the corpus directories from the target's Foundry config. Replay timeout defaults to the smaller of the campaign timeout and 1800 seconds so showmap collection stays within the benchmark completion grace window unless explicitly overridden.
 
 ### Cumulative conversion (`analysis/events_to_cumulative.py`)
 

@@ -8,34 +8,45 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "fuzzers" / "foundry" / "run.sh"
 
 
+def write_common_sh(tmp_dir: Path, *, include_timeout: bool = False) -> Path:
+    timeout_line = (
+        '    printf \'\\t%s\' "${SCFUZZBENCH_TIMEOUT_SECONDS}"\n'
+        if include_timeout
+        else ""
+    )
+    common_sh = tmp_dir / "common.sh"
+    common_sh.write_text(
+        f"""
+register_shutdown_trap() {{ :; }}
+prepare_workspace() {{ mkdir -p "${{SCFUZZBENCH_WORKDIR}}/target" "${{SCFUZZBENCH_LOG_DIR}}"; }}
+clone_target() {{ :; }}
+apply_benchmark_type() {{ :; }}
+build_target() {{ :; }}
+set_default_worker_env() {{ :; }}
+log() {{ printf '%s\\n' "$*" >> "${{SCFUZZBENCH_LOG_DIR}}/log.txt"; }}
+upload_results() {{ :; }}
+run_with_timeout() {{
+  {{
+    printf 'RUN'
+{timeout_line}
+    for arg in "$@"; do printf '\\t%s' "$arg"; done
+    printf '\\n'
+  }} >> "${{SCFUZZBENCH_LOG_DIR}}/commands.tsv"
+  return 0
+}}
+""",
+        encoding="utf-8",
+    )
+    return common_sh
+
+
 class FoundryRunShowmapArgsTests(unittest.TestCase):
     def test_showmap_replay_keeps_test_args_but_uses_script_showmap_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             log_dir = tmp_dir / "logs"
             work_dir = tmp_dir / "work"
-            common_sh = tmp_dir / "common.sh"
-            common_sh.write_text(
-                """
-register_shutdown_trap() { :; }
-prepare_workspace() { mkdir -p "${SCFUZZBENCH_WORKDIR}/target" "${SCFUZZBENCH_LOG_DIR}"; }
-clone_target() { :; }
-apply_benchmark_type() { :; }
-build_target() { :; }
-set_default_worker_env() { :; }
-log() { printf '%s\n' "$*" >> "${SCFUZZBENCH_LOG_DIR}/log.txt"; }
-upload_results() { :; }
-run_with_timeout() {
-  {
-    printf 'RUN'
-    for arg in "$@"; do printf '\t%s' "$arg"; done
-    printf '\n'
-  } >> "${SCFUZZBENCH_LOG_DIR}/commands.tsv"
-  return 0
-}
-""",
-                encoding="utf-8",
-            )
+            common_sh = write_common_sh(tmp_dir)
 
             env = os.environ.copy()
             env.update(
@@ -78,28 +89,7 @@ run_with_timeout() {
             log_dir = tmp_dir / "logs"
             work_dir = tmp_dir / "work"
             corpus_dir = tmp_dir / "seed-corpus"
-            common_sh = tmp_dir / "common.sh"
-            common_sh.write_text(
-                """
-register_shutdown_trap() { :; }
-prepare_workspace() { mkdir -p "${SCFUZZBENCH_WORKDIR}/target" "${SCFUZZBENCH_LOG_DIR}"; }
-clone_target() { :; }
-apply_benchmark_type() { :; }
-build_target() { :; }
-set_default_worker_env() { :; }
-log() { printf '%s\n' "$*" >> "${SCFUZZBENCH_LOG_DIR}/log.txt"; }
-upload_results() { :; }
-run_with_timeout() {
-  {
-    printf 'RUN'
-    for arg in "$@"; do printf '\t%s' "$arg"; done
-    printf '\n'
-  } >> "${SCFUZZBENCH_LOG_DIR}/commands.tsv"
-  return 0
-}
-""",
-                encoding="utf-8",
-            )
+            common_sh = write_common_sh(tmp_dir)
 
             env = os.environ.copy()
             env.update(
@@ -121,6 +111,45 @@ run_with_timeout() {
             replay_args = commands[1][2:]
             corpus_idx = replay_args.index("--showmap-corpus-dir")
             self.assertEqual(replay_args[corpus_idx + 1], str(corpus_dir))
+
+    def test_showmap_replay_uses_bounded_default_timeout(self):
+        def run_case(timeout: str, override: str | None = None) -> list[list[str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_dir = Path(tmp)
+                log_dir = tmp_dir / "logs"
+                work_dir = tmp_dir / "work"
+                common_sh = write_common_sh(tmp_dir, include_timeout=True)
+
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "SCFUZZBENCH_COMMON_SH": str(common_sh),
+                        "SCFUZZBENCH_WORKDIR": str(work_dir),
+                        "SCFUZZBENCH_LOG_DIR": str(log_dir),
+                        "SCFUZZBENCH_RUN_ID": "bench-trial",
+                        "SCFUZZBENCH_TIMEOUT_SECONDS": timeout,
+                        "SCFUZZBENCH_FOUNDRY_SHOWMAP": "1",
+                        "FOUNDRY_LABEL": "foundry-master",
+                    }
+                )
+                if override is not None:
+                    env["SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS"] = override
+
+                subprocess.check_call(["bash", str(SCRIPT)], env=env)
+                lines = (log_dir / "commands.tsv").read_text(encoding="utf-8").splitlines()
+                return [line.split("\t") for line in lines]
+
+        long_campaign = run_case("86400")
+        self.assertEqual(long_campaign[0][1], "86400")
+        self.assertEqual(long_campaign[1][1], "1800")
+
+        short_campaign = run_case("60")
+        self.assertEqual(short_campaign[0][1], "60")
+        self.assertEqual(short_campaign[1][1], "60")
+
+        explicit_override = run_case("86400", "42")
+        self.assertEqual(explicit_override[0][1], "86400")
+        self.assertEqual(explicit_override[1][1], "42")
 
 
 if __name__ == "__main__":
