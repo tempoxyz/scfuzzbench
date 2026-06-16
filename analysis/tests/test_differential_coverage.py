@@ -106,10 +106,16 @@ class DifferentialCoverageTests(unittest.TestCase):
 
             with (out_dir / "differential_coverage_relscores.csv").open(newline="") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(rows, [])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["campaign"], "combined")
+            self.assertEqual(rows[0]["approach"], "foundry-master")
+            self.assertEqual(rows[0]["relscore"], "0.000000")
             with (out_dir / "differential_coverage_relcov.csv").open(newline="") as handle:
                 relcov_rows = list(csv.DictReader(handle))
-            self.assertEqual(relcov_rows, [])
+            self.assertEqual(len(relcov_rows), 1)
+            self.assertEqual(relcov_rows[0]["approach"], "foundry-master")
+            self.assertEqual(relcov_rows[0]["reference_approach"], "foundry-master")
+            self.assertEqual(relcov_rows[0]["relcov"], "1.000000")
             self.assertTrue(
                 (out_dir / "showmap_campaigns" / "combined" / "foundry-master").is_dir()
             )

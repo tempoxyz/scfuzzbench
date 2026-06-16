@@ -1761,9 +1761,6 @@ def write_differential_coverage_outputs(
         write_showmap_campaign_dir(campaign, campaign_dir)
         summary = showmap_campaign_summary(campaign)
         manifest["campaigns"][campaign_name] = summary
-        if len(campaign) < 2:
-            # relscore/relcov are comparative; still write single-approach campaigns for inspection.
-            continue
         relscores = calculate_relscores(campaign)
         for approach, score in sorted(
             relscores.items(), key=lambda item: (-item[1], item[0])
