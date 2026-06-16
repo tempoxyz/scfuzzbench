@@ -316,6 +316,27 @@ class DifferentialCoverageTests(unittest.TestCase):
                 "0.333333",
             )
 
+    def test_combined_is_not_a_suite_name_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            showmap_dir = root / "logs" / "i-live" / "showmap" / "foundry-master__combined"
+            showmap_dir.mkdir(parents=True)
+            (showmap_dir / "trial-1.txt").write_text("a:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(root / "logs", out_dir)
+
+            self.assertTrue(
+                (
+                    out_dir
+                    / "showmap_campaigns"
+                    / "by_test"
+                    / "combined"
+                    / "foundry-master"
+                    / "i-live__trial-1.txt"
+                ).is_file()
+            )
+
     def test_sanitizes_special_path_components(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

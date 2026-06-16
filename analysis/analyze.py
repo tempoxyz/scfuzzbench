@@ -187,7 +187,7 @@ class ShowmapTrial:
     instance_id: str
     fuzzer_label: str
     approach: str
-    suite_test: str
+    suite_test: Optional[str]
     trial_id: str
     raw_path: str
     edges: Set[str]
@@ -1570,11 +1570,11 @@ def sanitize_showmap_component(value: str) -> str:
     return sanitized
 
 
-def parse_showmap_approach_dir(name: str) -> Tuple[str, str]:
+def parse_showmap_approach_dir(name: str) -> Tuple[str, Optional[str]]:
     parts = [part for part in name.split("__") if part]
     if len(parts) >= 2:
         return parts[0], "__".join(parts[1:])
-    return name, "combined"
+    return name, None
 
 
 def read_afl_showmap(path: Path) -> Set[str]:
@@ -1645,7 +1645,11 @@ def load_showmap_trials(
                     instance_id=instance_id,
                     fuzzer_label=fuzzer_label,
                     approach=sanitize_showmap_component(approach),
-                    suite_test=sanitize_showmap_component(suite_test),
+                    suite_test=(
+                        sanitize_showmap_component(suite_test)
+                        if suite_test is not None
+                        else None
+                    ),
                     trial_id=trial_id,
                     raw_path=str(trial_file),
                     edges=edges,
@@ -1669,7 +1673,7 @@ def build_showmap_campaigns(
     campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]] = {"combined": {}}
     for trial in trials:
         merge_edges(campaigns["combined"], trial.approach, trial.trial_id, trial.edges)
-        if trial.suite_test != "combined":
+        if trial.suite_test is not None:
             campaign_name = f"by_test/{trial.suite_test}"
             merge_edges(
                 campaigns.setdefault(campaign_name, {}),
