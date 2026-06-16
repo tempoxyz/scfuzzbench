@@ -12,14 +12,34 @@ def is_runner_metrics_csv(path: Path) -> bool:
     return "runner_metrics" in name or "runner-metrics" in name
 
 
-def copy_tree_contents(src: Path, dest: Path) -> None:
+def sanitize_copy_hint(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "._=-" else "_" for ch in value)
+    return cleaned.strip("_") or "copy"
+
+
+def unique_copy_target(target: Path, hint: str) -> Path:
+    if not target.exists():
+        return target
+
+    safe_hint = sanitize_copy_hint(hint)
+    candidate = target.with_name(f"{target.stem}__{safe_hint}{target.suffix}")
+    idx = 2
+    while candidate.exists():
+        candidate = target.with_name(f"{target.stem}__{safe_hint}__{idx}{target.suffix}")
+        idx += 1
+    return candidate
+
+
+def copy_showmap_tree(src: Path, dest: Path, hint: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    for child in src.iterdir():
-        target = dest / child.name
+    for child in sorted(src.rglob("*")):
+        rel = child.relative_to(src)
+        target = dest / rel
         if child.is_dir():
-            shutil.copytree(child, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(child, target)
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(child, unique_copy_target(target, hint))
 
 
 def main() -> int:
@@ -71,8 +91,13 @@ def main() -> int:
             shutil.copy2(metric_file, dest_instance / out_name)
             used_metric_names.add(out_name)
             copied_metrics += 1
+        dest_showmap = dest_instance / "showmap"
+        if showmap_dirs and dest_showmap.exists():
+            shutil.rmtree(dest_showmap)
         for showmap_dir in showmap_dirs:
-            copy_tree_contents(showmap_dir, dest_instance / "showmap")
+            rel_parent = showmap_dir.relative_to(instance_dir).parent
+            hint = "__".join(rel_parent.parts)
+            copy_showmap_tree(showmap_dir, dest_showmap, hint)
             copied_showmap_dirs += 1
     print(
         f"Copied {copied_logs} log file(s), {copied_metrics} runner metrics file(s), "

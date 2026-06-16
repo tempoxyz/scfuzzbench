@@ -61,15 +61,14 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${show
   showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
   showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
   showmap_corpus_dir="${FOUNDRY_SHOWMAP_CORPUS_DIR:-${SCFUZZBENCH_CORPUS_DIR:-}}"
-  if [[ -z "${showmap_corpus_dir}" ]]; then
-    showmap_corpus_dir="${repo_dir}/corpus/foundry"
-  fi
   showmap_args=(
     --showmap-out "${showmap_dir}"
     --showmap-approach "${SCFUZZBENCH_FUZZER_LABEL}"
     --showmap-trial "${showmap_trial}"
-    --showmap-corpus-dir "${showmap_corpus_dir}"
   )
+  if [[ -n "${showmap_corpus_dir}" ]]; then
+    showmap_args+=(--showmap-corpus-dir "${showmap_corpus_dir}")
+  fi
   if [[ -n "${FOUNDRY_SHOWMAP_DOMAIN:-}" ]]; then
     showmap_args=(--showmap-domain "${FOUNDRY_SHOWMAP_DOMAIN}" "${showmap_args[@]}")
   fi
@@ -78,7 +77,25 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${show
   if [[ -n "${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS:-}" ]]; then
     SCFUZZBENCH_TIMEOUT_SECONDS="${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS}"
   fi
-  run_with_timeout "${showmap_log_file}" forge test --mc CryticToFoundry "${showmap_args[@]}" || \
+  replay_extra_args=()
+  skip_showmap_arg_value=0
+  for arg in "${extra_args[@]}"; do
+    if [[ "${skip_showmap_arg_value}" -eq 1 ]]; then
+      skip_showmap_arg_value=0
+      continue
+    fi
+    case "${arg}" in
+      --showmap-out|--showmap-approach|--showmap-trial|--showmap-corpus-dir|--showmap-domain)
+        skip_showmap_arg_value=1
+        ;;
+      --showmap-out=*|--showmap-approach=*|--showmap-trial=*|--showmap-corpus-dir=*|--showmap-domain=*)
+        ;;
+      *)
+        replay_extra_args+=("${arg}")
+        ;;
+    esac
+  done
+  run_with_timeout "${showmap_log_file}" forge test --mc CryticToFoundry "${replay_extra_args[@]}" "${showmap_args[@]}" || \
     log "Foundry showmap replay failed; continuing with original forge test exit code ${exit_code}."
   if [[ -n "${original_timeout}" ]]; then
     SCFUZZBENCH_TIMEOUT_SECONDS="${original_timeout}"

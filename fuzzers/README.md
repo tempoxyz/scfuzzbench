@@ -55,4 +55,4 @@ Environment variables:
 - `SCFUZZBENCH_FOUNDRY_SHOWMAP` (set to `0` to skip Foundry showmap replay after the main campaign)
 - `SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS` (optional timeout override for showmap replay)
 - `FOUNDRY_SHOWMAP_DOMAIN` (optional `forge test --showmap-domain` value)
-- `FOUNDRY_SHOWMAP_CORPUS_DIR` (optional `forge test --showmap-corpus-dir` override)
+- `FOUNDRY_SHOWMAP_CORPUS_DIR` (optional `forge test --showmap-corpus-dir` override; when unset, `forge` resolves corpus directories from project config)
