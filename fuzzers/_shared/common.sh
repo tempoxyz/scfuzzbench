@@ -518,18 +518,25 @@ install_foundry() {
     fi
     local commit
     commit=$(git -C "${tmp_dir}/foundry" rev-parse --short HEAD)
-    log "Building Foundry at ${commit} with profile ${foundry_build_profile} on Rust ${foundry_rust_toolchain}"
+    local cargo_target_args=()
+    local foundry_target_dir="${tmp_dir}/foundry/target/${foundry_build_profile}"
+    if [[ -n "${FOUNDRY_BUILD_TARGET:-}" ]]; then
+      cargo_target_args=(--target "${FOUNDRY_BUILD_TARGET}")
+      foundry_target_dir="${tmp_dir}/foundry/target/${FOUNDRY_BUILD_TARGET}/${foundry_build_profile}"
+    fi
+    log "Building Foundry at ${commit} with profile ${foundry_build_profile} on Rust ${foundry_rust_toolchain}${FOUNDRY_BUILD_TARGET:+ for target ${FOUNDRY_BUILD_TARGET}}"
     # Build only the binaries we need (forge + cast); skip anvil/chisel to save
     # build time. Select by `--bin` only: `--package cast` is ambiguous because a
     # transitive `cast` crate shares the name with Foundry's `cast` package.
     cargo +"${foundry_rust_toolchain}" build \
       --locked \
       --profile "${foundry_build_profile}" \
+      "${cargo_target_args[@]}" \
       --bin forge \
       --bin cast \
       --manifest-path "${tmp_dir}/foundry/Cargo.toml"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
+    install -m 0755 "${foundry_target_dir}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
+    install -m 0755 "${foundry_target_dir}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
     echo "${commit}" > "${SCFUZZBENCH_ROOT}/foundry_commit"
     echo "${FOUNDRY_GIT_REPO}" > "${SCFUZZBENCH_ROOT}/foundry_repo"
     rm -rf "${tmp_dir}"
