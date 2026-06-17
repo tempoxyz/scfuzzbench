@@ -12,9 +12,15 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from differential_coverage import DifferentialCoverage
+
+@dataclass(frozen=True)
+class LogFile:
+    path: Path
+    instance_id: str
+    fuzzer_label: str
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
@@ -882,9 +888,8 @@ def parse_throughput_log(
     return samples
 
 
-def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
-    events: List[Event] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+def discover_log_files(logs_dir: Path) -> Tuple[LogFile, ...]:
+    files: List[LogFile] = []
     for path in logs_dir.rglob("*"):
         if not path.is_file():
             continue
@@ -895,6 +900,21 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
             continue
         instance_label = rel.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
+        files.append(LogFile(path, instance_id, fuzzer_label))
+    return tuple(files)
+
+
+def parse_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[Event]:
+    events: List[Event] = []
+    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    for log_file in log_files:
+        path = log_file.path
+        instance_id = log_file.instance_id
+        fuzzer_label = log_file.fuzzer_label
         fuzzer = normalize_fuzzer(fuzzer_label)
         if fuzzer == "foundry":
             events.extend(parse_foundry_log(path, run_id_value, instance_id, fuzzer_label))
@@ -929,20 +949,22 @@ def parse_logs(logs_dir: Path, run_id: Optional[str]) -> List[Event]:
     return events
 
 
-def parse_throughput_logs(logs_dir: Path, run_id: Optional[str]) -> List[ThroughputSample]:
+def parse_throughput_logs(
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
+) -> List[ThroughputSample]:
     samples: List[ThroughputSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
-        samples.extend(parse_throughput_log(path, run_id_value, instance_id, fuzzer_label))
+    for log_file in log_files:
+        samples.extend(
+            parse_throughput_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
+        )
     return samples
 
 
@@ -1068,22 +1090,20 @@ def parse_progress_metrics_log(
 
 
 def parse_progress_metrics_logs(
-    logs_dir: Path, run_id: Optional[str]
+    logs_dir: Path,
+    run_id: Optional[str],
+    log_files: Sequence[LogFile],
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
     run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
-    for path in logs_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if not should_parse_log_file(path):
-            continue
-        rel = path.relative_to(logs_dir)
-        if len(rel.parts) < 2:
-            continue
-        instance_label = rel.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
+    for log_file in log_files:
         samples.extend(
-            parse_progress_metrics_log(path, run_id_value, instance_id, fuzzer_label)
+            parse_progress_metrics_log(
+                log_file.path,
+                run_id_value,
+                log_file.instance_id,
+                log_file.fuzzer_label,
+            )
         )
     return samples
 
@@ -1847,17 +1867,21 @@ def main() -> int:
     args = parse_args()
     raw_labels = getattr(args, "raw_labels", False)
     if args.command == "parse":
-        events = parse_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
         if raw_labels:
             events = _apply_raw_labels_events(events)
         write_events_csv(events, args.out_csv)
         return 0
     if args.command == "run":
         out_dir: Path = args.out_dir
-        events = parse_logs(args.logs_dir, args.run_id)
-        throughput_samples = parse_throughput_logs(args.logs_dir, args.run_id)
+        log_files = discover_log_files(args.logs_dir)
+        events = parse_logs(args.logs_dir, args.run_id, log_files)
+        throughput_samples = parse_throughput_logs(
+            args.logs_dir, args.run_id, log_files
+        )
         progress_metrics_samples = parse_progress_metrics_logs(
-            args.logs_dir, args.run_id
+            args.logs_dir, args.run_id, log_files
         )
         if raw_labels:
             events = _apply_raw_labels_events(events)
