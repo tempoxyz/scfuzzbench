@@ -105,7 +105,7 @@ You can run fuzzers locally without AWS infrastructure using `scripts/local-run.
 ### Prerequisites
 
 - The fuzzer binary must already be installed (e.g. `echidna-test` in `$PATH`)
-- Foundry must be installed (`forge`, `cast`)
+- Foundry must be installed (`forge`)
 - `zip` must be available for result packaging
 
 ### Usage

@@ -519,17 +519,14 @@ install_foundry() {
     local commit
     commit=$(git -C "${tmp_dir}/foundry" rev-parse --short HEAD)
     log "Building Foundry at ${commit} with profile ${foundry_build_profile} on Rust ${foundry_rust_toolchain}"
-    # Build only the binaries we need (forge + cast); skip anvil/chisel to save
-    # build time. Select by `--bin` only: `--package cast` is ambiguous because a
-    # transitive `cast` crate shares the name with Foundry's `cast` package.
+    # The benchmark path only invokes forge; do not build extra Foundry binaries
+    # on every CI comparison side.
     cargo +"${foundry_rust_toolchain}" build \
       --locked \
       --profile "${foundry_build_profile}" \
       --bin forge \
-      --bin cast \
       --manifest-path "${tmp_dir}/foundry/Cargo.toml"
     install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
-    install -m 0755 "${tmp_dir}/foundry/target/${foundry_build_profile}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
     echo "${commit}" > "${SCFUZZBENCH_ROOT}/foundry_commit"
     echo "${FOUNDRY_GIT_REPO}" > "${SCFUZZBENCH_ROOT}/foundry_repo"
     rm -rf "${tmp_dir}"
