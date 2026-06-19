@@ -163,6 +163,11 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `mixed-results`: `0.95 <= relcov(candidate, baseline) < 0.98` and `relscore(candidate) > relscore(baseline)`
   - `regression`: `relcov(candidate, baseline) < 0.95` or `relscore(candidate) < 0.98 * relscore(baseline)`
   - `inconclusive`: none of the above matched.
+- Multi-target CI tags each trial with its target before differential coverage
+  analysis. `differential_coverage_summary.csv` then includes `by_target/<name>`
+  campaign rows before any Slack status rendering. Matrix status applies the same
+  thresholds to the median `candidate_covers_baseline` and median
+  `relscore_ratio` across those target campaign rows.
 - `SCFUZZBENCH_FOUNDRY_SHOWMAP=0` disables Foundry showmap collection. `FOUNDRY_SHOWMAP_DOMAIN`, `FOUNDRY_SHOWMAP_CORPUS_DIR`, and `SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS` tune replay behavior. When no corpus override is set, showmap replay lets `forge` resolve the corpus directories from the target's Foundry config. Replay timeout defaults to the smaller of the campaign timeout and 1800 seconds so showmap collection stays within the benchmark completion grace window unless explicitly overridden.
 
 ### Cumulative conversion (`analysis/events_to_cumulative.py`)

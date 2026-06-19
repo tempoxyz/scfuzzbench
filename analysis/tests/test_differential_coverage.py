@@ -433,6 +433,32 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(combined["candidate_covers_baseline"], "0.750000")
             self.assertEqual(combined["baseline_covers_candidate"], "0.750000")
 
+    def test_target_labels_create_target_campaign_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "logs"
+            for target, master_edges, pr_edges in [
+                ("aave", "a:1\nb:1\n", "a:1\nc:1\n"),
+                ("nerite", "x:1\ny:1\n", "x:1\ny:1\nz:1\n"),
+            ]:
+                master = logs / f"i-master__target-{target}" / "showmap" / "master__Suite"
+                pr = logs / f"i-pr__target-{target}" / "showmap" / "pr-1__Suite"
+                master.mkdir(parents=True)
+                pr.mkdir(parents=True)
+                (master / "trial-1.txt").write_text(master_edges, encoding="utf-8")
+                (pr / "trial-1.txt").write_text(pr_edges, encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(logs, out_dir)
+
+            with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            campaigns = {row["campaign"] for row in rows}
+
+            self.assertIn("by_target/aave", campaigns)
+            self.assertIn("by_target/nerite", campaigns)
+            self.assertIn("combined", campaigns)
+
     def test_differential_coverage_verdict_thresholds(self):
         self.assertEqual(
             analyze.differential_coverage_verdict(0.99, 10.0, 10.0),

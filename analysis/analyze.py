@@ -194,6 +194,7 @@ class ShowmapTrial:
     instance_label: str
     instance_id: str
     fuzzer_label: str
+    target_label: Optional[str]
     approach: str
     suite_test: Optional[str]
     trial_id: str
@@ -1637,6 +1638,11 @@ def load_showmap_trials(
             continue
         instance_label = rel_showmap_dir.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
+        target_label = None
+        if "__target-" in instance_label:
+            prefix, _, suffix = instance_label.partition("__target-")
+            instance_id, fuzzer_label = split_instance_label(prefix)
+            target_label = suffix.split("__", 1)[0]
 
         for trial_file in sorted(showmap_dir.rglob("*.txt")):
             rel_trial = trial_file.relative_to(showmap_dir)
@@ -1670,6 +1676,7 @@ def load_showmap_trials(
                     instance_label=instance_label,
                     instance_id=instance_id,
                     fuzzer_label=fuzzer_label,
+                    target_label=target_label,
                     approach=sanitize_showmap_component(approach),
                     suite_test=(
                         sanitize_showmap_component(suite_test)
@@ -1699,6 +1706,14 @@ def build_showmap_campaigns(
     campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]] = {"combined": {}}
     for trial in trials:
         merge_edges(campaigns["combined"], trial.approach, trial.trial_id, trial.edges)
+        if trial.target_label is not None:
+            target_campaign = f"by_target/{trial.target_label}"
+            merge_edges(
+                campaigns.setdefault(target_campaign, {}),
+                trial.approach,
+                trial.trial_id,
+                trial.edges,
+            )
         if trial.suite_test is not None:
             campaign_name = f"by_test/{trial.suite_test}"
             merge_edges(
@@ -1707,6 +1722,14 @@ def build_showmap_campaigns(
                 trial.trial_id,
                 trial.edges,
             )
+            if trial.target_label is not None:
+                target_test_campaign = f"by_target/{trial.target_label}/by_test/{trial.suite_test}"
+                merge_edges(
+                    campaigns.setdefault(target_test_campaign, {}),
+                    trial.approach,
+                    trial.trial_id,
+                    trial.edges,
+                )
     return campaigns
 
 
