@@ -459,6 +459,82 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertIn("by_target/nerite", campaigns)
             self.assertIn("combined", campaigns)
 
+    def test_seed_labels_pair_by_seed_and_collapse_campaign_trials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "logs"
+            for label, approach, edges_by_suite in [
+                ("foundry-master", "foundry-master", {"SuiteA": "a:1\n", "SuiteB": "b:1\n"}),
+                ("foundry-candidate", "foundry-candidate", {"SuiteA": "a:1\n", "SuiteB": "c:1\n"}),
+            ]:
+                for suite, edges in edges_by_suite.items():
+                    showmap = (
+                        logs
+                        / f"{label}__target-aave__seed-101"
+                        / "showmap"
+                        / f"{approach}__{suite}"
+                    )
+                    showmap.mkdir(parents=True)
+                    (showmap / "trial-1.txt").write_text(edges, encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(logs, out_dir)
+
+            with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            target_row = next(row for row in rows if row["campaign"] == "by_target/aave")
+            self.assertEqual(target_row["n_trials"], "1")
+            self.assertEqual(target_row["paired"], "true")
+            self.assertEqual(target_row["pairing_rate"], "1.000000")
+            self.assertEqual(target_row["test_name"], "paired-sign")
+
+            campaign_file = (
+                out_dir
+                / "showmap_campaigns"
+                / "by_target"
+                / "aave"
+                / "foundry-master"
+                / "seed-101.txt"
+            )
+            self.assertEqual(campaign_file.read_text(encoding="utf-8"), "a:1\nb:1\n")
+
+    def test_seed_labels_do_not_fall_back_to_unpaired_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "logs"
+            master = logs / "foundry-master__target-aave__seed-1" / "showmap" / "foundry-master__Suite"
+            candidate = (
+                logs
+                / "foundry-candidate__target-aave__seed-2"
+                / "showmap"
+                / "foundry-candidate__Suite"
+            )
+            master.mkdir(parents=True)
+            candidate.mkdir(parents=True)
+            (master / "trial-1.txt").write_text("a:1\n", encoding="utf-8")
+            (candidate / "trial-1.txt").write_text("a:1\nb:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(logs, out_dir)
+
+            with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            target_row = next(row for row in rows if row["campaign"] == "by_target/aave")
+            self.assertEqual(target_row["n_trials"], "0")
+            self.assertEqual(target_row["paired"], "false")
+            self.assertEqual(target_row["test_name"], "paired-seed-required")
+            self.assertEqual(target_row["decision"], "inconclusive")
+
+            state = json.loads(
+                (out_dir / "differential_coverage_sequential_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            target_state = next(
+                row for row in state["rows"] if row["campaign"] == "by_target/aave"
+            )
+            self.assertIn("unpaired fallback disabled", target_state["reason"])
+
     def test_differential_coverage_verdict_thresholds(self):
         self.assertEqual(
             analyze.differential_coverage_verdict(0.99, 10.0, 10.0),
@@ -466,7 +542,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         )
         self.assertEqual(
             analyze.differential_coverage_verdict(0.96, 11.0, 10.0),
-            "mixed-results",
+            "needs-review",
         )
         self.assertEqual(
             analyze.differential_coverage_verdict(0.94, 20.0, 10.0),
@@ -477,7 +553,7 @@ class DifferentialCoverageTests(unittest.TestCase):
             "regression",
         )
 
-    def test_sequential_state_eliminates_dominated_arm_without_claiming_savings(self):
+    def test_sequential_state_does_not_emit_scheduler_elimination(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c", "d"} for i in range(3)},
             "pr-1": {f"s{i}": {"a"} for i in range(3)},
@@ -490,9 +566,10 @@ class DifferentialCoverageTests(unittest.TestCase):
         rows, directive = analyze.build_sequential_state_rows(
             summary, {"by_target/aave": campaign}, max_trials_per_arm=12
         )
-        self.assertEqual(rows[0]["decision"], "eliminate")
+        self.assertEqual(rows[0]["decision"], "inconclusive")
         self.assertEqual(rows[0]["trials_saved_vs_fixed_n"], 0)
-        self.assertEqual(directive["schedule"][0]["decision"], "eliminate")
+        self.assertEqual(directive["aggregate"]["eliminated_count"], 0)
+        self.assertEqual(directive["schedule"][0]["decision"], "inconclusive")
 
     def test_sequential_state_does_not_auto_declare_winner_without_valid_inference(self):
         campaign = {
@@ -543,7 +620,7 @@ class DifferentialCoverageTests(unittest.TestCase):
                 false_winners += int(rows[0]["decision"] == "winner")
         self.assertLessEqual(false_winners / 50, 0.05)
 
-    def test_sequential_state_records_censoring_and_does_not_block(self):
+    def test_sequential_state_records_missing_count_and_does_not_block(self):
         campaign = {
             "master": {"s1": {"a", "b"}, "s2": {"a", "b"}},
             "pr-1": {"s1": {"a", "b"}, "s2": {"a", "b", "c"}},
@@ -554,8 +631,8 @@ class DifferentialCoverageTests(unittest.TestCase):
             "by_target/slow", relscores, relcovs
         )
         rows, _ = analyze.build_sequential_state_rows(summary, {"by_target/slow": campaign})
-        self.assertIn(rows[0]["decision"], {"continue", "winner", "inconclusive"})
-        self.assertEqual(rows[0]["censored_count"], 0)
+        self.assertEqual(rows[0]["decision"], "inconclusive")
+        self.assertEqual(rows[0]["missing_count"], 0)
 
     def test_sequential_state_models_confirmation_cache_reuse(self):
         campaign = {

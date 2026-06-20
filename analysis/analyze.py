@@ -195,6 +195,7 @@ class ShowmapTrial:
     instance_id: str
     fuzzer_label: str
     target_label: Optional[str]
+    seed_label: Optional[str]
     approach: str
     suite_test: Optional[str]
     trial_id: str
@@ -1604,6 +1605,25 @@ def parse_showmap_approach_dir(name: str) -> Tuple[str, Optional[str]]:
     return name, None
 
 
+def parse_showmap_instance_label(
+    instance_label: str,
+) -> Tuple[str, str, Optional[str], Optional[str]]:
+    marker = re.search(r"__(?:target|seed)-", instance_label)
+    base_label = instance_label[: marker.start()] if marker else instance_label
+    target_label = None
+    seed_label = None
+
+    if marker:
+        for part in instance_label[marker.start() + 2 :].split("__"):
+            if part.startswith("target-"):
+                target_label = sanitize_showmap_component(part.removeprefix("target-"))
+            elif part.startswith("seed-"):
+                seed_label = sanitize_showmap_component(part.removeprefix("seed-"))
+
+    instance_id, fuzzer_label = split_instance_label(base_label)
+    return instance_id, fuzzer_label, target_label, seed_label
+
+
 def read_afl_showmap(path: Path) -> Set[str]:
     edges: Set[str] = set()
     for line_number, raw_line in enumerate(
@@ -1637,12 +1657,9 @@ def load_showmap_trials(
         if not rel_showmap_dir.parts:
             continue
         instance_label = rel_showmap_dir.parts[0]
-        instance_id, fuzzer_label = split_instance_label(instance_label)
-        target_label = None
-        if "__target-" in instance_label:
-            prefix, _, suffix = instance_label.partition("__target-")
-            instance_id, fuzzer_label = split_instance_label(prefix)
-            target_label = suffix.split("__", 1)[0]
+        instance_id, fuzzer_label, target_label, seed_label = parse_showmap_instance_label(
+            instance_label
+        )
 
         for trial_file in sorted(showmap_dir.rglob("*.txt")):
             rel_trial = trial_file.relative_to(showmap_dir)
@@ -1670,13 +1687,18 @@ def load_showmap_trials(
 
             trial_rel = Path(*rel_trial.parts[1:]).with_suffix("")
             trial_name = "__".join(trial_rel.parts)
-            trial_id = sanitize_showmap_component(f"{instance_label}__{trial_name}")
+            trial_id = (
+                sanitize_showmap_component(f"seed-{seed_label}")
+                if seed_label is not None
+                else sanitize_showmap_component(f"{instance_label}__{trial_name}")
+            )
             trials.append(
                 ShowmapTrial(
                     instance_label=instance_label,
                     instance_id=instance_id,
                     fuzzer_label=fuzzer_label,
                     target_label=target_label,
+                    seed_label=seed_label,
                     approach=sanitize_showmap_component(approach),
                     suite_test=(
                         sanitize_showmap_component(suite_test)
@@ -1864,7 +1886,7 @@ def differential_coverage_verdict(
     if candidate_covers_baseline >= 0.98 and candidate_relscore >= baseline_relscore:
         return "improvement"
     if 0.95 <= candidate_covers_baseline < 0.98 and candidate_relscore > baseline_relscore:
-        return "mixed-results"
+        return "needs-review"
     return "inconclusive"
 
 
@@ -2008,16 +2030,38 @@ def build_sequential_state_rows(
         baseline_scores_by_trial = relscores_by_trial.get(baseline, {})
         candidate_scores_by_trial = relscores_by_trial.get(candidate, {})
         shared_ids = sorted(set(baseline_scores_by_trial) & set(candidate_scores_by_trial))
+        baseline_seed_ids = {
+            trial_id for trial_id in baseline_scores_by_trial if trial_id.startswith("seed-")
+        }
+        candidate_seed_ids = {
+            trial_id for trial_id in candidate_scores_by_trial if trial_id.startswith("seed-")
+        }
+        seed_pairing_expected = bool(baseline_seed_ids or candidate_seed_ids)
+        expected_pairs = (
+            min(len(baseline_seed_ids), len(candidate_seed_ids))
+            if seed_pairing_expected
+            else 0
+        )
+        pairing_rate = (
+            len(shared_ids) / expected_pairs
+            if expected_pairs
+            else (1.0 if shared_ids else 0.0)
+        )
         paired = bool(shared_ids)
         if paired:
             baseline_scores = [baseline_scores_by_trial[trial_id] for trial_id in shared_ids]
             candidate_scores = [candidate_scores_by_trial[trial_id] for trial_id in shared_ids]
+        elif seed_pairing_expected:
+            baseline_scores = []
+            candidate_scores = []
         else:
             baseline_scores = list(baseline_scores_by_trial.values())
             candidate_scores = list(candidate_scores_by_trial.values())
         statistic, p_value = (
             _paired_statistic(candidate_scores, baseline_scores)
             if paired
+            else (0.0, 1.0)
+            if seed_pairing_expected
             else _mann_whitney_u(candidate_scores, baseline_scores)
         )
         candidate_relcovs = [
@@ -2032,20 +2076,20 @@ def build_sequential_state_rows(
         ratio_ci = _normal_ci(ratio_samples, confidence_level)
         relcov_ci = _normal_ci(candidate_relcovs or [candidate_covers_baseline], confidence_level)
         cs_bounds = _confidence_sequence(ratio_samples, confidence_level)
-        n_trials = min(len(candidate_scores), len(baseline_scores)) if paired else len(candidate_scores)
-        decision = "continue"
-        reason = "minimum trials not reached"
-        if n_trials >= min_trials_before_elimination and relcov_ci[1] < relcov_floor:
-            decision = "eliminate"
-            reason = "relcov confidence upper bound below floor"
-        elif n_trials >= max_trials_per_arm:
-            decision = "inconclusive"
-            reason = "budget cap reached without separation"
-        elif legacy_verdict == "regression" and relscore_ratio > 1.0 and candidate_covers_baseline < relcov_floor:
-            decision = "continue"
-            reason = "coverage-shift/needs-review; spend next wave if budget remains"
-        elif n_trials >= min_trials_before_elimination:
-            reason = "insufficient significant evidence for an automated decision"
+        n_trials = (
+            min(len(candidate_scores), len(baseline_scores))
+            if paired
+            else 0
+            if seed_pairing_expected
+            else len(candidate_scores)
+        )
+        decision = "inconclusive"
+        if seed_pairing_expected and not paired:
+            reason = "shared seed labels required but no matched seeds; unpaired fallback disabled"
+        elif seed_pairing_expected and pairing_rate < 0.8:
+            reason = f"low matched seed rate {len(shared_ids)}/{expected_pairs}; use verdict with caution"
+        else:
+            reason = "scheduler disabled; use verdict"
         rows.append(
             {
                 "campaign": campaign_name,
@@ -2054,7 +2098,14 @@ def build_sequential_state_rows(
                 "metric": "relscore",
                 "n_trials": n_trials,
                 "paired": paired,
-                "test_name": "paired-sign" if paired else "mann-whitney-u-normal-approx",
+                "pairing_rate": pairing_rate,
+                "test_name": (
+                    "paired-sign"
+                    if paired
+                    else "paired-seed-required"
+                    if seed_pairing_expected
+                    else "mann-whitney-u-normal-approx"
+                ),
                 "statistic": statistic,
                 "p_value": p_value,
                 "effect_size_a12": _a12(candidate_scores, baseline_scores),
@@ -2066,7 +2117,7 @@ def build_sequential_state_rows(
                 "covers_baseline_ci_high": relcov_ci[1],
                 "cs_lower": cs_bounds[0],
                 "cs_upper": cs_bounds[1],
-                "censored_count": 0,
+                "missing_count": 0,
                 "decision": decision,
                 "trials_spent": n_trials,
                 "trials_saved_vs_fixed_n": 0,
@@ -2082,25 +2133,20 @@ def build_sequential_state_rows(
     for idx, p_adjusted in zip(target_indices, target_adjusted):
         rows[idx]["p_value_adjusted"] = p_adjusted
 
-    eliminated = [row for row in rows if row["decision"] == "eliminate"]
-    continuing = [row for row in rows if row["decision"] == "continue"]
-    aggregate_decision = "continue" if continuing else "inconclusive"
-    if eliminated and len(eliminated) == len(rows):
-        aggregate_decision = "eliminate"
     directive = {
         "version": 1,
         "confidence_level": confidence_level,
         "relcov_floor": relcov_floor,
         "aggregate": {
             "winner": "",
-            "decision": aggregate_decision,
-            "eligible_count": len(rows) - len(eliminated),
-            "eliminated_count": len(eliminated),
+            "decision": "inconclusive",
+            "eligible_count": len(rows),
+            "eliminated_count": 0,
             "total_campaigns_run": sum(int(row["trials_spent"]) for row in rows),
             "fixed_n_equivalent": max_trials_per_arm * len(rows),
             "trials_saved_vs_fixed_n": 0,
             "automated_winner_enabled": False,
-            "note": "Winner decisions are disabled until independent seed/round campaign units and anytime-valid inference are implemented.",
+            "note": "Scheduler decisions are disabled; use the verdict field for benchmark status.",
         },
         "schedule": [
             {
@@ -2108,7 +2154,7 @@ def build_sequential_state_rows(
                 "arm": row["candidate"],
                 "decision": row["decision"],
                 "next_seeds": [],
-                "next_targets": [] if not row["campaign"].startswith("by_target/") else [row["campaign"].split("/", 1)[1]],
+                "next_targets": [],
                 "reason": row["reason"],
             }
             for row in rows
@@ -2287,6 +2333,7 @@ def write_differential_coverage_outputs(
                 "relscore_ratio",
                 "n_trials",
                 "paired",
+                "pairing_rate",
                 "test_name",
                 "statistic",
                 "p_value",
@@ -2298,7 +2345,7 @@ def write_differential_coverage_outputs(
                 "covers_baseline_ci_high",
                 "cs_lower",
                 "cs_upper",
-                "censored_count",
+                "missing_count",
                 "decision",
                 "trials_spent",
                 "trials_saved_vs_fixed_n",
@@ -2330,6 +2377,7 @@ def write_differential_coverage_outputs(
                     f"{relscore_ratio:.6f}",
                     sequential.get("n_trials", ""),
                     str(sequential.get("paired", "")).lower(),
+                    f"{float(sequential.get('pairing_rate', 0.0)):.6f}" if sequential else "",
                     sequential.get("test_name", ""),
                     f"{float(sequential.get('statistic', 0.0)):.6f}" if sequential else "",
                     f"{float(sequential.get('p_value', 1.0)):.6f}" if sequential else "",
@@ -2341,7 +2389,7 @@ def write_differential_coverage_outputs(
                     f"{float(sequential.get('covers_baseline_ci_high', candidate_covers_baseline)):.6f}" if sequential else "",
                     f"{float(sequential.get('cs_lower', relscore_ratio)):.6f}" if sequential else "",
                     f"{float(sequential.get('cs_upper', relscore_ratio)):.6f}" if sequential else "",
-                    sequential.get("censored_count", ""),
+                    sequential.get("missing_count", ""),
                     sequential.get("decision", ""),
                     sequential.get("trials_spent", ""),
                     sequential.get("trials_saved_vs_fixed_n", ""),

@@ -160,7 +160,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
 - Relscore and relcov are computed through the `differential-coverage` package from normalized AFL showmap campaign directories. Only positive AFL showmap counts are treated as covered edges.
 - When a campaign has one baseline approach (`master`, `main`, `stable`, or a `*-master`/`*-main` label) and one candidate approach, `differential_coverage_summary.csv` records a verdict:
   - `improvement`: `relcov(candidate, baseline) >= 0.98` and `relscore(candidate) >= relscore(baseline)`
-  - `mixed-results`: `0.95 <= relcov(candidate, baseline) < 0.98` and `relscore(candidate) > relscore(baseline)`
+  - `needs-review`: `0.95 <= relcov(candidate, baseline) < 0.98` and `relscore(candidate) > relscore(baseline)`
   - `regression`: `relcov(candidate, baseline) < 0.95` or `relscore(candidate) < 0.98 * relscore(baseline)`
   - `inconclusive`: none of the above matched.
 - Multi-target CI tags each trial with its target before differential coverage
