@@ -1890,6 +1890,9 @@ def _normal_ci(values: Sequence[float], confidence_level: float) -> Tuple[float,
 
 
 def _confidence_sequence(values: Sequence[float], confidence_level: float) -> Tuple[float, float]:
+    # This is a descriptive sequential monitoring interval, not an anytime-valid
+    # martingale/e-process confidence sequence. The decision logic below does
+    # not use it to declare winners.
     if not values:
         return 0.0, 0.0
     center = _mean(values)
@@ -1936,9 +1939,6 @@ def _paired_statistic(xs: Sequence[float], ys: Sequence[float]) -> Tuple[float, 
         return 0.0, 1.0
     positives = sum(1 for x, y in pairs if x > y)
     n = len(pairs)
-    # Sign-test fallback for paired CRN campaigns. The CSV calls this Wilcoxon
-    # compatible path "paired-wilcoxon-sign" because it is used at the same
-    # decision point when paired ranks are unavailable.
     tail = sum(math.comb(n, k) for k in range(positives, n + 1)) / (2**n)
     p = min(1.0, 2.0 * min(tail, 1.0 - tail + math.comb(n, positives) / (2**n)))
     return float(positives), p
@@ -1953,6 +1953,10 @@ def _holm_adjust(p_values: Sequence[float]) -> List[float]:
         running = max(running, min(1.0, (m - rank) * p_value))
         adjusted[idx] = running
     return adjusted
+
+
+def _is_target_family_campaign(campaign_name: str) -> bool:
+    return campaign_name.startswith("by_target/") and "/by_test/" not in campaign_name
 
 
 def trial_scores(
@@ -2001,12 +2005,16 @@ def build_sequential_state_rows(
         if not campaign or baseline not in campaign or candidate not in campaign:
             continue
         relscores_by_trial = trial_scores(campaign)
-        baseline_scores = list(relscores_by_trial.get(baseline, {}).values())
-        candidate_scores = list(relscores_by_trial.get(candidate, {}).values())
-        paired = bool(
-            set(relscores_by_trial.get(baseline, {}))
-            & set(relscores_by_trial.get(candidate, {}))
-        )
+        baseline_scores_by_trial = relscores_by_trial.get(baseline, {})
+        candidate_scores_by_trial = relscores_by_trial.get(candidate, {})
+        shared_ids = sorted(set(baseline_scores_by_trial) & set(candidate_scores_by_trial))
+        paired = bool(shared_ids)
+        if paired:
+            baseline_scores = [baseline_scores_by_trial[trial_id] for trial_id in shared_ids]
+            candidate_scores = [candidate_scores_by_trial[trial_id] for trial_id in shared_ids]
+        else:
+            baseline_scores = list(baseline_scores_by_trial.values())
+            candidate_scores = list(candidate_scores_by_trial.values())
         statistic, p_value = (
             _paired_statistic(candidate_scores, baseline_scores)
             if paired
@@ -2020,10 +2028,7 @@ def build_sequential_state_rows(
             for edges in campaign[candidate].values()
             if set().union(*campaign[baseline].values())
         ]
-        ratio_samples = [
-            (c / b) if b else 0.0
-            for c, b in zip(candidate_scores, baseline_scores)
-        ] or [relscore_ratio]
+        ratio_samples = [relscore_ratio]
         ratio_ci = _normal_ci(ratio_samples, confidence_level)
         relcov_ci = _normal_ci(candidate_relcovs or [candidate_covers_baseline], confidence_level)
         cs_bounds = _confidence_sequence(ratio_samples, confidence_level)
@@ -2033,26 +2038,14 @@ def build_sequential_state_rows(
         if n_trials >= min_trials_before_elimination and relcov_ci[1] < relcov_floor:
             decision = "eliminate"
             reason = "relcov confidence upper bound below floor"
-        elif (
-            n_trials >= min_trials_before_elimination
-            and relcov_ci[0] >= relcov_floor
-            and (
-                cs_bounds[0] > 1.0
-                or (
-                    legacy_verdict == "improvement"
-                    and candidate_relscore > baseline_relscore
-                    and _a12(candidate_scores, baseline_scores) >= 0.71
-                )
-            )
-        ):
-            decision = "winner"
-            reason = "anytime-valid lower bound clears baseline and relcov floor"
         elif n_trials >= max_trials_per_arm:
             decision = "inconclusive"
             reason = "budget cap reached without separation"
         elif legacy_verdict == "regression" and relscore_ratio > 1.0 and candidate_covers_baseline < relcov_floor:
             decision = "continue"
             reason = "coverage-shift/needs-review; spend next wave if budget remains"
+        elif n_trials >= min_trials_before_elimination:
+            reason = "insufficient significant evidence for an automated decision"
         rows.append(
             {
                 "campaign": campaign_name,
@@ -2061,7 +2054,7 @@ def build_sequential_state_rows(
                 "metric": "relscore",
                 "n_trials": n_trials,
                 "paired": paired,
-                "test_name": "paired-wilcoxon-sign" if paired else "mann-whitney-u",
+                "test_name": "paired-sign" if paired else "mann-whitney-u-normal-approx",
                 "statistic": statistic,
                 "p_value": p_value,
                 "effect_size_a12": _a12(candidate_scores, baseline_scores),
@@ -2076,41 +2069,45 @@ def build_sequential_state_rows(
                 "censored_count": 0,
                 "decision": decision,
                 "trials_spent": n_trials,
-                "trials_saved_vs_fixed_n": max(max_trials_per_arm - n_trials, 0),
+                "trials_saved_vs_fixed_n": 0,
                 "reason": reason,
             }
         )
-    adjusted = _holm_adjust([float(row["p_value"]) for row in rows])
-    for row, p_adjusted in zip(rows, adjusted):
-        row["p_value_adjusted"] = p_adjusted
+    for row in rows:
+        row["p_value_adjusted"] = row["p_value"]
+    target_indices = [
+        idx for idx, row in enumerate(rows) if _is_target_family_campaign(str(row["campaign"]))
+    ]
+    target_adjusted = _holm_adjust([float(rows[idx]["p_value"]) for idx in target_indices])
+    for idx, p_adjusted in zip(target_indices, target_adjusted):
+        rows[idx]["p_value_adjusted"] = p_adjusted
 
-    winners = [row for row in rows if row["decision"] == "winner"]
     eliminated = [row for row in rows if row["decision"] == "eliminate"]
     continuing = [row for row in rows if row["decision"] == "continue"]
     aggregate_decision = "continue" if continuing else "inconclusive"
-    if winners and len(winners) > len(rows) / 2 and not eliminated:
-        aggregate_decision = "winner"
-    elif eliminated and len(eliminated) == len(rows):
+    if eliminated and len(eliminated) == len(rows):
         aggregate_decision = "eliminate"
     directive = {
         "version": 1,
         "confidence_level": confidence_level,
         "relcov_floor": relcov_floor,
         "aggregate": {
-            "winner": winners[0]["candidate"] if winners else "",
+            "winner": "",
             "decision": aggregate_decision,
             "eligible_count": len(rows) - len(eliminated),
             "eliminated_count": len(eliminated),
             "total_campaigns_run": sum(int(row["trials_spent"]) for row in rows),
             "fixed_n_equivalent": max_trials_per_arm * len(rows),
-            "trials_saved_vs_fixed_n": sum(int(row["trials_saved_vs_fixed_n"]) for row in rows),
+            "trials_saved_vs_fixed_n": 0,
+            "automated_winner_enabled": False,
+            "note": "Winner decisions are disabled until independent seed/round campaign units and anytime-valid inference are implemented.",
         },
         "schedule": [
             {
                 "campaign": row["campaign"],
                 "arm": row["candidate"],
                 "decision": row["decision"],
-                "next_seeds": [] if row["decision"] != "continue" else ["next-wave"],
+                "next_seeds": [],
                 "next_targets": [] if not row["campaign"].startswith("by_target/") else [row["campaign"].split("/", 1)[1]],
                 "reason": row["reason"],
             }

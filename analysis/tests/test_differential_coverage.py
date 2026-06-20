@@ -477,7 +477,7 @@ class DifferentialCoverageTests(unittest.TestCase):
             "regression",
         )
 
-    def test_sequential_state_eliminates_dominated_arm_and_saves_trials(self):
+    def test_sequential_state_eliminates_dominated_arm_without_claiming_savings(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c", "d"} for i in range(3)},
             "pr-1": {f"s{i}": {"a"} for i in range(3)},
@@ -491,10 +491,10 @@ class DifferentialCoverageTests(unittest.TestCase):
             summary, {"by_target/aave": campaign}, max_trials_per_arm=12
         )
         self.assertEqual(rows[0]["decision"], "eliminate")
-        self.assertGreater(rows[0]["trials_saved_vs_fixed_n"], 0)
+        self.assertEqual(rows[0]["trials_saved_vs_fixed_n"], 0)
         self.assertEqual(directive["schedule"][0]["decision"], "eliminate")
 
-    def test_sequential_state_declares_clear_best_arm_early(self):
+    def test_sequential_state_does_not_auto_declare_winner_without_valid_inference(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c"} for i in range(4)},
             "pr-1": {f"s{i}": {"a", "b", "c", f"x{i}", f"y{i}"} for i in range(4)},
@@ -507,25 +507,40 @@ class DifferentialCoverageTests(unittest.TestCase):
         rows, directive = analyze.build_sequential_state_rows(
             summary, {"by_target/nerite": campaign}, max_trials_per_arm=12
         )
-        self.assertEqual(rows[0]["decision"], "winner")
-        self.assertEqual(directive["aggregate"]["decision"], "winner")
+        self.assertNotEqual(rows[0]["decision"], "winner")
+        self.assertFalse(directive["aggregate"]["automated_winner_enabled"])
 
-    def test_sequential_state_repeated_peeking_under_null_stays_inconclusive(self):
+    def test_sequential_state_noisy_equal_means_never_auto_wins_across_peeks(self):
         false_winners = 0
         for run in range(50):
-            campaign = {
-                "master": {f"s{i}": {f"e{(i + run) % 5}", "shared"} for i in range(6)},
-                "pr-1": {f"s{i}": {f"e{(i + run) % 5}", "shared"} for i in range(6)},
+            full_campaign = {
+                "master": {
+                    f"s{i}": {"shared", f"m{(i + run) % 3}", f"n{i % 2}"}
+                    for i in range(6)
+                },
+                "pr-1": {
+                    f"s{i}": {"shared", f"p{(i + run) % 3}", f"n{i % 2}"}
+                    for i in range(6)
+                },
             }
-            relscores = analyze.calculate_relscores(campaign)
-            relcovs = analyze.calculate_relcovs(campaign)
-            summary = analyze.build_differential_coverage_summary_rows(
-                "by_target/null", relscores, relcovs
-            )
-            rows, _ = analyze.build_sequential_state_rows(
-                summary, {"by_target/null": campaign}, max_trials_per_arm=6
-            )
-            false_winners += int(rows[0]["decision"] == "winner")
+            for wave_end in range(2, 7):
+                campaign = {
+                    arm: {
+                        trial_id: edges
+                        for trial_id, edges in trials.items()
+                        if int(trial_id[1:]) < wave_end
+                    }
+                    for arm, trials in full_campaign.items()
+                }
+                relscores = analyze.calculate_relscores(campaign)
+                relcovs = analyze.calculate_relcovs(campaign)
+                summary = analyze.build_differential_coverage_summary_rows(
+                    "by_target/null", relscores, relcovs
+                )
+                rows, _ = analyze.build_sequential_state_rows(
+                    summary, {"by_target/null": campaign}, max_trials_per_arm=6
+                )
+                false_winners += int(rows[0]["decision"] == "winner")
         self.assertLessEqual(false_winners / 50, 0.05)
 
     def test_sequential_state_records_censoring_and_does_not_block(self):
@@ -557,7 +572,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["trials_spent"], 2)
         if rows[0]["decision"] == "continue":
-            self.assertEqual(directive["schedule"][0]["next_seeds"], ["next-wave"])
+            self.assertEqual(directive["schedule"][0]["next_seeds"], [])
 
     def test_sequential_state_exercises_paired_and_unpaired_paths(self):
         paired = {
@@ -581,7 +596,9 @@ class DifferentialCoverageTests(unittest.TestCase):
             unpaired_summary, {"by_target/unpaired": unpaired}
         )
         self.assertTrue(paired_rows[0]["paired"])
+        self.assertEqual(paired_rows[0]["test_name"], "paired-sign")
         self.assertFalse(unpaired_rows[0]["paired"])
+        self.assertEqual(unpaired_rows[0]["test_name"], "mann-whitney-u-normal-approx")
 
     def test_combined_is_not_a_suite_name_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:
