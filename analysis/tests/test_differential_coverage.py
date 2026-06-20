@@ -478,11 +478,14 @@ class DifferentialCoverageTests(unittest.TestCase):
                     (showmap / "trial-1.txt").write_text(edges, encoding="utf-8")
 
             out_dir = root / "out"
-            analyze.write_differential_coverage_outputs(logs, out_dir)
+            analyze.write_differential_coverage_outputs(
+                logs, out_dir, pairing_mode="paired"
+            )
 
             with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
                 rows = list(csv.DictReader(handle))
             target_row = next(row for row in rows if row["campaign"] == "by_target/aave")
+            self.assertEqual(target_row["pairing_mode"], "paired")
             self.assertEqual(target_row["n_trials"], "1")
             self.assertEqual(target_row["paired"], "true")
             self.assertEqual(target_row["pairing_rate"], "1.000000")
@@ -497,6 +500,33 @@ class DifferentialCoverageTests(unittest.TestCase):
                 / "seed-101.txt"
             )
             self.assertEqual(campaign_file.read_text(encoding="utf-8"), "a:1\nb:1\n")
+
+    def test_seed_labels_do_not_pair_without_paired_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "logs"
+            for label, approach in [
+                ("foundry-master", "foundry-master"),
+                ("foundry-candidate", "foundry-candidate"),
+            ]:
+                showmap = (
+                    logs
+                    / f"{label}__target-aave__seed-101"
+                    / "showmap"
+                    / f"{approach}__Suite"
+                )
+                showmap.mkdir(parents=True)
+                (showmap / "trial-1.txt").write_text("a:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(logs, out_dir)
+
+            with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            target_row = next(row for row in rows if row["campaign"] == "by_target/aave")
+            self.assertEqual(target_row["pairing_mode"], "unpaired")
+            self.assertEqual(target_row["paired"], "false")
+            self.assertEqual(target_row["test_name"], "mann-whitney-u-normal-approx")
 
     def test_seed_labels_do_not_fall_back_to_unpaired_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -515,14 +545,17 @@ class DifferentialCoverageTests(unittest.TestCase):
             (candidate / "trial-1.txt").write_text("a:1\nb:1\n", encoding="utf-8")
 
             out_dir = root / "out"
-            analyze.write_differential_coverage_outputs(logs, out_dir)
+            analyze.write_differential_coverage_outputs(
+                logs, out_dir, pairing_mode="paired"
+            )
 
             with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
                 rows = list(csv.DictReader(handle))
             target_row = next(row for row in rows if row["campaign"] == "by_target/aave")
+            self.assertEqual(target_row["pairing_mode"], "paired")
             self.assertEqual(target_row["n_trials"], "0")
             self.assertEqual(target_row["paired"], "false")
-            self.assertEqual(target_row["test_name"], "paired-seed-required")
+            self.assertEqual(target_row["test_name"], "paired-required")
             self.assertEqual(target_row["decision"], "inconclusive")
 
             state = json.loads(
@@ -653,8 +686,8 @@ class DifferentialCoverageTests(unittest.TestCase):
 
     def test_sequential_state_exercises_paired_and_unpaired_paths(self):
         paired = {
-            "master": {"s1": {"a"}, "s2": {"a"}},
-            "pr-1": {"s1": {"a", "b"}, "s2": {"a", "c"}},
+            "master": {"seed-1": {"a"}, "seed-2": {"a"}},
+            "pr-1": {"seed-1": {"a", "b"}, "seed-2": {"a", "c"}},
         }
         unpaired = {
             "master": {"m1": {"a"}, "m2": {"a"}},
@@ -667,7 +700,7 @@ class DifferentialCoverageTests(unittest.TestCase):
             "by_target/unpaired", analyze.calculate_relscores(unpaired), analyze.calculate_relcovs(unpaired)
         )
         paired_rows, _ = analyze.build_sequential_state_rows(
-            paired_summary, {"by_target/paired": paired}
+            paired_summary, {"by_target/paired": paired}, pairing_mode="paired"
         )
         unpaired_rows, _ = analyze.build_sequential_state_rows(
             unpaired_summary, {"by_target/unpaired": unpaired}

@@ -163,6 +163,10 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `needs-review`: `0.95 <= relcov(candidate, baseline) < 0.98` and `relscore(candidate) > relscore(baseline)`
   - `regression`: `relcov(candidate, baseline) < 0.95` or `relscore(candidate) < 0.98 * relscore(baseline)`
   - `inconclusive`: none of the above matched.
+- Differential coverage has an explicit pairing mode. `unpaired` treats repeated
+  rounds as independent samples. `paired` requires matching seed-labeled trials
+  across arms and refuses silent fallback to an unpaired test when matches are
+  absent.
 - Multi-target CI tags each trial with its target before differential coverage
   analysis. `differential_coverage_summary.csv` then includes `by_target/<name>`
   campaign rows before any Slack status rendering. Matrix status applies the same

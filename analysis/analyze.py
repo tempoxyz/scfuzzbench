@@ -2010,7 +2010,10 @@ def build_sequential_state_rows(
     relcov_floor: float = 0.95,
     max_trials_per_arm: int = 12,
     min_trials_before_elimination: int = 2,
+    pairing_mode: str = "unpaired",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if pairing_mode not in {"unpaired", "paired"}:
+        raise ValueError(f"unsupported differential coverage pairing mode: {pairing_mode}")
     rows: List[Dict[str, Any]] = []
     for (
         campaign_name,
@@ -2036,18 +2039,14 @@ def build_sequential_state_rows(
         candidate_seed_ids = {
             trial_id for trial_id in candidate_scores_by_trial if trial_id.startswith("seed-")
         }
-        seed_pairing_expected = bool(baseline_seed_ids or candidate_seed_ids)
+        seed_pairing_expected = pairing_mode == "paired"
         expected_pairs = (
             min(len(baseline_seed_ids), len(candidate_seed_ids))
             if seed_pairing_expected
             else 0
         )
-        pairing_rate = (
-            len(shared_ids) / expected_pairs
-            if expected_pairs
-            else (1.0 if shared_ids else 0.0)
-        )
-        paired = bool(shared_ids)
+        pairing_rate = len(shared_ids) / expected_pairs if expected_pairs else 0.0
+        paired = seed_pairing_expected and expected_pairs > 0 and bool(shared_ids)
         if paired:
             baseline_scores = [baseline_scores_by_trial[trial_id] for trial_id in shared_ids]
             candidate_scores = [candidate_scores_by_trial[trial_id] for trial_id in shared_ids]
@@ -2085,7 +2084,7 @@ def build_sequential_state_rows(
         )
         decision = "inconclusive"
         if seed_pairing_expected and not paired:
-            reason = "shared seed labels required but no matched seeds; unpaired fallback disabled"
+            reason = "paired mode requires matched seed labels; unpaired fallback disabled"
         elif seed_pairing_expected and pairing_rate < 0.8:
             reason = f"low matched seed rate {len(shared_ids)}/{expected_pairs}; use verdict with caution"
         else:
@@ -2096,13 +2095,14 @@ def build_sequential_state_rows(
                 "baseline": baseline,
                 "candidate": candidate,
                 "metric": "relscore",
+                "pairing_mode": pairing_mode,
                 "n_trials": n_trials,
                 "paired": paired,
                 "pairing_rate": pairing_rate,
                 "test_name": (
                     "paired-sign"
                     if paired
-                    else "paired-seed-required"
+                    else "paired-required"
                     if seed_pairing_expected
                     else "mann-whitney-u-normal-approx"
                 ),
@@ -2232,6 +2232,7 @@ def write_differential_coverage_outputs(
     out_dir: Path,
     excluded_fuzzers: Optional[Set[str]] = None,
     max_work_items: Optional[int] = None,
+    pairing_mode: str = "unpaired",
 ) -> None:
     trials, skipped = load_showmap_trials(logs_dir, excluded_fuzzers)
     campaigns = build_showmap_campaigns(trials)
@@ -2313,7 +2314,7 @@ def write_differential_coverage_outputs(
 
     summary_csv = out_dir / "differential_coverage_summary.csv"
     sequential_rows, scheduling_directive = build_sequential_state_rows(
-        summary_rows, campaigns
+        summary_rows, campaigns, pairing_mode=pairing_mode
     )
     sequential_by_key = {
         (row["campaign"], row["candidate"]): row for row in sequential_rows
@@ -2331,6 +2332,7 @@ def write_differential_coverage_outputs(
                 "baseline_relscore",
                 "candidate_relscore",
                 "relscore_ratio",
+                "pairing_mode",
                 "n_trials",
                 "paired",
                 "pairing_rate",
@@ -2375,6 +2377,7 @@ def write_differential_coverage_outputs(
                     f"{baseline_relscore:.6f}",
                     f"{candidate_relscore:.6f}",
                     f"{relscore_ratio:.6f}",
+                    sequential.get("pairing_mode", pairing_mode),
                     sequential.get("n_trials", ""),
                     str(sequential.get("paired", "")).lower(),
                     f"{float(sequential.get('pairing_rate', 0.0)):.6f}" if sequential else "",
@@ -2401,6 +2404,7 @@ def write_differential_coverage_outputs(
         json.dump(
             {
                 "schema": "scfuzzbench.differential_coverage.sequential_state.v1",
+                "pairing_mode": pairing_mode,
                 "rows": sequential_rows,
                 "scheduling_directive": scheduling_directive,
             },
@@ -2438,6 +2442,12 @@ def parse_args() -> argparse.Namespace:
         "--raw-labels",
         action="store_true",
         help="Use raw directory names as fuzzer labels instead of normalizing.",
+    )
+    run_parser.add_argument(
+        "--pairing-mode",
+        choices=["unpaired", "paired"],
+        default="unpaired",
+        help="Differential coverage test mode: independent rounds or explicit paired runs.",
     )
 
     return parser.parse_args()
@@ -2506,7 +2516,9 @@ def main() -> int:
         write_progress_metrics_summary_csv(
             progress_metrics_samples, progress_metrics_summary_csv
         )
-        write_differential_coverage_outputs(args.logs_dir, out_dir)
+        write_differential_coverage_outputs(
+            args.logs_dir, out_dir, pairing_mode=args.pairing_mode
+        )
         return 0
     return 1
 

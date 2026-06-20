@@ -19,6 +19,7 @@ ANALYSIS_LOGS_DIR ?= $(DEST)/analysis
 ANALYSIS_OUT_DIR ?= $(DEST)/data
 IMAGES_OUT_DIR ?= $(DEST)/images
 EXCLUDE_FUZZERS ?=
+DIFFERENTIAL_COVERAGE_PAIRING_MODE ?= unpaired
 DURATION_HOURS ?=
 SHOW_MEAN ?=
 EVENTS_CSV ?= $(ANALYSIS_OUT_DIR)/events.csv
@@ -93,6 +94,7 @@ RAW_LABELS_ARG :=
 ifneq ($(strip $(RAW_LABELS)),)
 RAW_LABELS_ARG := --raw-labels
 endif
+DIFFERENTIAL_COVERAGE_PAIRING_ARG := --pairing-mode $(DIFFERENTIAL_COVERAGE_PAIRING_MODE)
 DURATION_ARG :=
 
 .PHONY: terraform-init terraform-init-backend terraform-fmt terraform-validate terraform-plan terraform-deploy terraform-destroy terraform-destroy-infra analysis-venv results-analyze results-download results-prepare results-analyze-filtered results-analyze-all results-inspect s3-purge-versions report-benchmark report-wide-to-long report-events-to-cumulative report-invariant-overlap report-runner-metrics
@@ -125,7 +127,7 @@ analysis-venv:
 	$(ANALYSIS_PY) -c "import sys; print(sys.executable)" >/dev/null
 
 results-analyze: analysis-venv
-	$(ANALYSIS_PY) analysis/analyze.py run --logs-dir $(LOGS_DIR) --out-dir $(OUT_DIR) $(RUN_ID_ARG) $(RAW_LABELS_ARG)
+	$(ANALYSIS_PY) analysis/analyze.py run --logs-dir $(LOGS_DIR) --out-dir $(OUT_DIR) $(RUN_ID_ARG) $(RAW_LABELS_ARG) $(DIFFERENTIAL_COVERAGE_PAIRING_ARG)
 
 results-download:
 	$(ANALYSIS_PY) scripts/download_run_artifacts.py --bucket $(BUCKET) --run-id $(RUN_ID) $(BENCHMARK_UUID_ARG) --dest $(DEST) --category $(ARTIFACT_CATEGORY) $(PROFILE_ARG) $(NO_UNZIP_ARG)
@@ -134,7 +136,7 @@ results-prepare:
 	$(ANALYSIS_PY) scripts/prepare_analysis_logs.py --unzipped-dir $(UNZIPPED_DIR) --out-dir $(ANALYSIS_LOGS_DIR)
 
 results-analyze-filtered: analysis-venv
-	$(ANALYSIS_PY) scripts/run_analysis_filtered.py --logs-dir $(ANALYSIS_LOGS_DIR) --out-dir $(ANALYSIS_OUT_DIR) $(RUN_ID_ARG) $(EXCLUDE_ARG) $(RAW_LABELS_ARG)
+	$(ANALYSIS_PY) scripts/run_analysis_filtered.py --logs-dir $(ANALYSIS_LOGS_DIR) --out-dir $(ANALYSIS_OUT_DIR) $(RUN_ID_ARG) $(EXCLUDE_ARG) $(RAW_LABELS_ARG) $(DIFFERENTIAL_COVERAGE_PAIRING_ARG)
 
 results-analyze-all: analysis-venv results-download results-prepare results-analyze-filtered report-events-to-cumulative report-benchmark report-invariant-overlap report-runner-metrics
 
