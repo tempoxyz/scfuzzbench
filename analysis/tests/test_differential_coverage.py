@@ -110,7 +110,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         )
 
     def _relscore_row(self, campaign_name, campaign, **kwargs):
-        rows, directive = analyze.build_sequential_state_rows(
+        rows, directive = analyze.build_differential_coverage_verdict_rows(
             self._summary_for(campaign_name, campaign),
             {campaign_name: campaign},
             **kwargs,
@@ -597,11 +597,10 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(target_row["n_trials"], "0")
             self.assertEqual(target_row["paired"], "false")
             self.assertEqual(target_row["test_name"], "paired-required")
-            self.assertEqual(target_row["decision"], "inconclusive")
             self.assertEqual(target_row["verdict"], "inconclusive")
 
             state = json.loads(
-                (out_dir / "differential_coverage_sequential_state.json").read_text(
+                (out_dir / "differential_coverage_statistics.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -628,7 +627,7 @@ class DifferentialCoverageTests(unittest.TestCase):
             "regression",
         )
 
-    def test_sequential_state_does_not_emit_scheduler_elimination(self):
+    def test_differential_coverage_verdict_state_has_no_scheduler_contract(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c", "d"} for i in range(3)},
             "pr-1": {f"s{i}": {"a"} for i in range(3)},
@@ -638,15 +637,15 @@ class DifferentialCoverageTests(unittest.TestCase):
         summary = analyze.build_differential_coverage_summary_rows(
             "by_target/aave", relscores, relcovs
         )
-        rows, directive = analyze.build_sequential_state_rows(
-            summary, {"by_target/aave": campaign}, max_trials_per_arm=12
+        rows, directive = analyze.build_differential_coverage_verdict_rows(
+            summary, {"by_target/aave": campaign}
         )
-        self.assertEqual(rows[0]["decision"], "inconclusive")
-        self.assertEqual(rows[0]["trials_saved_vs_fixed_n"], 0)
-        self.assertEqual(directive["aggregate"]["eliminated_count"], 0)
-        self.assertEqual(directive["schedule"][0]["decision"], "inconclusive")
+        self.assertNotIn("decision", rows[0])
+        self.assertNotIn("schedule", directive)
+        self.assertNotIn("decision", directive["aggregate"])
+        self.assertNotIn("automated_winner_enabled", directive["aggregate"])
 
-    def test_sequential_state_does_not_auto_declare_winner_without_valid_inference(self):
+    def test_differential_coverage_verdict_state_reports_verdict_without_scheduler_fields(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c"} for i in range(4)},
             "pr-1": {f"s{i}": {"a", "b", "c", f"x{i}", f"y{i}"} for i in range(4)},
@@ -656,46 +655,13 @@ class DifferentialCoverageTests(unittest.TestCase):
         summary = analyze.build_differential_coverage_summary_rows(
             "by_target/nerite", relscores, relcovs
         )
-        rows, directive = analyze.build_sequential_state_rows(
-            summary, {"by_target/nerite": campaign}, max_trials_per_arm=12
+        rows, directive = analyze.build_differential_coverage_verdict_rows(
+            summary, {"by_target/nerite": campaign}
         )
-        self.assertNotEqual(rows[0]["decision"], "winner")
-        self.assertFalse(directive["aggregate"]["automated_winner_enabled"])
+        self.assertIn(rows[0]["verdict"], {"improvement", "regression", "needs-review", "inconclusive"})
+        self.assertIn(directive["aggregate"]["verdict"], {"improvement", "regression", "needs-review", "inconclusive"})
 
-    def test_sequential_state_noisy_equal_means_never_auto_wins_across_peeks(self):
-        false_winners = 0
-        for run in range(50):
-            full_campaign = {
-                "master": {
-                    f"s{i}": {"shared", f"m{(i + run) % 3}", f"n{i % 2}"}
-                    for i in range(6)
-                },
-                "pr-1": {
-                    f"s{i}": {"shared", f"p{(i + run) % 3}", f"n{i % 2}"}
-                    for i in range(6)
-                },
-            }
-            for wave_end in range(2, 7):
-                campaign = {
-                    arm: {
-                        trial_id: edges
-                        for trial_id, edges in trials.items()
-                        if int(trial_id[1:]) < wave_end
-                    }
-                    for arm, trials in full_campaign.items()
-                }
-                relscores = analyze.calculate_relscores(campaign)
-                relcovs = analyze.calculate_relcovs(campaign)
-                summary = analyze.build_differential_coverage_summary_rows(
-                    "by_target/null", relscores, relcovs
-                )
-                rows, _ = analyze.build_sequential_state_rows(
-                    summary, {"by_target/null": campaign}, max_trials_per_arm=6
-                )
-                false_winners += int(rows[0]["decision"] == "winner")
-        self.assertLessEqual(false_winners / 50, 0.05)
-
-    def test_sequential_state_records_missing_count_and_does_not_block(self):
+    def test_differential_coverage_verdict_state_records_missing_count_and_does_not_block(self):
         campaign = {
             "master": {"s1": {"a", "b"}, "s2": {"a", "b"}},
             "pr-1": {"s1": {"a", "b"}, "s2": {"a", "b", "c"}},
@@ -705,28 +671,10 @@ class DifferentialCoverageTests(unittest.TestCase):
         summary = analyze.build_differential_coverage_summary_rows(
             "by_target/slow", relscores, relcovs
         )
-        rows, _ = analyze.build_sequential_state_rows(summary, {"by_target/slow": campaign})
-        self.assertEqual(rows[0]["decision"], "inconclusive")
+        rows, _ = analyze.build_differential_coverage_verdict_rows(summary, {"by_target/slow": campaign})
         self.assertEqual(rows[0]["missing_count"], 0)
 
-    def test_sequential_state_models_confirmation_cache_reuse(self):
-        campaign = {
-            "master": {"s1": {"a", "b"}, "s2": {"a", "b"}},
-            "pr-1": {"s1": {"a", "b", "c"}, "s2": {"a", "b", "d"}},
-        }
-        relscores = analyze.calculate_relscores(campaign)
-        relcovs = analyze.calculate_relcovs(campaign)
-        summary = analyze.build_differential_coverage_summary_rows(
-            "by_target/aave", relscores, relcovs
-        )
-        rows, directive = analyze.build_sequential_state_rows(
-            summary, {"by_target/aave": campaign}, max_trials_per_arm=3
-        )
-        self.assertEqual(rows[0]["trials_spent"], 2)
-        if rows[0]["decision"] == "continue":
-            self.assertEqual(directive["schedule"][0]["next_seeds"], [])
-
-    def test_sequential_state_exercises_paired_and_unpaired_paths(self):
+    def test_differential_coverage_verdict_state_exercises_paired_and_unpaired_paths(self):
         paired = {
             "master": {"seed-1": {"a"}, "seed-2": {"a"}},
             "pr-1": {"seed-1": {"a", "b"}, "seed-2": {"a", "c"}},
@@ -741,10 +689,10 @@ class DifferentialCoverageTests(unittest.TestCase):
         unpaired_summary = analyze.build_differential_coverage_summary_rows(
             "by_target/unpaired", analyze.calculate_relscores(unpaired), analyze.calculate_relcovs(unpaired)
         )
-        paired_rows, _ = analyze.build_sequential_state_rows(
+        paired_rows, _ = analyze.build_differential_coverage_verdict_rows(
             paired_summary, {"by_target/paired": paired}, pairing_mode="paired"
         )
-        unpaired_rows, _ = analyze.build_sequential_state_rows(
+        unpaired_rows, _ = analyze.build_differential_coverage_verdict_rows(
             unpaired_summary, {"by_target/unpaired": unpaired}
         )
         self.assertTrue(paired_rows[0]["paired"])
@@ -754,7 +702,7 @@ class DifferentialCoverageTests(unittest.TestCase):
 
     def test_statistical_verdict_significant_paired_improvement(self):
         campaign = self._seeded_campaign([3, 3, 3, 3, 3, 3])
-        rows, directive = analyze.build_sequential_state_rows(
+        rows, directive = analyze.build_differential_coverage_verdict_rows(
             self._summary_for("by_target/aave", campaign),
             {"by_target/aave": campaign},
             pairing_mode="paired",
@@ -771,7 +719,6 @@ class DifferentialCoverageTests(unittest.TestCase):
         self.assertGreaterEqual(row["effect_size_a12"], analyze.A12_MEANINGFUL_HIGH)
         self.assertGreaterEqual(row["covers_baseline_ci_low"], 0.95)
         self.assertEqual(directive["aggregate"]["verdict"], "improvement")
-        self.assertEqual(directive["aggregate"]["decision"], "inconclusive")
 
     def test_statistical_verdict_noisy_equal_means_inconclusive(self):
         campaign = self._seeded_campaign([1, 1, 1, 1, 1, 1])
@@ -810,7 +757,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         summary = self._summary_for("by_target/good", good) + self._summary_for(
             "by_target/bad", bad
         )
-        rows, directive = analyze.build_sequential_state_rows(
+        rows, directive = analyze.build_differential_coverage_verdict_rows(
             summary,
             {"by_target/good": good, "by_target/bad": bad},
             pairing_mode="paired",

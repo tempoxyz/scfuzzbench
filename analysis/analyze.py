@@ -1971,21 +1971,6 @@ def _bca_mean_ci(
     return _percentile(boot, low_q), _percentile(boot, high_q), "ok"
 
 
-def _confidence_sequence(values: Sequence[float], confidence_level: float) -> Tuple[float, float]:
-    # This is a descriptive sequential monitoring interval, not an anytime-valid
-    # martingale/e-process confidence sequence. The decision logic below does
-    # not use it to declare winners.
-    if not values:
-        return 0.0, 0.0
-    center = _mean(values)
-    if len(values) == 1:
-        return center, center
-    alpha = max(1.0 - confidence_level, 1e-9)
-    variance = _sample_variance(values)
-    radius = math.sqrt(2.0 * variance * math.log(max(2.0, len(values)) / alpha) / len(values))
-    return center - radius, center + radius
-
-
 def _a12(xs: Sequence[float], ys: Sequence[float]) -> float:
     if not xs or not ys:
         return 0.5
@@ -2164,13 +2149,11 @@ def _verdict_reason(row: Dict[str, Any], relcov_floor: float) -> str:
     return "not significant after correction"
 
 
-def build_sequential_state_rows(
+def build_differential_coverage_verdict_rows(
     summary_rows: List[Tuple[str, str, str, str, float, float, float, float, float]],
     campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]],
     confidence_level: float = 0.95,
     relcov_floor: float = 0.95,
-    max_trials_per_arm: int = 12,
-    min_trials_before_elimination: int = 2,
     pairing_mode: str = "unpaired",
     min_samples: int = DEFAULT_MIN_VERDICT_SAMPLES,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -2260,8 +2243,6 @@ def build_sequential_state_rows(
         too_few_samples = n_samples < min_samples
         ratio_ci = _bca_mean_ci(ratio_samples, confidence_level, min_samples)
         relcov_ci = _bca_mean_ci(feature_relcovs, confidence_level, min_samples)
-        cs_bounds = _confidence_sequence(ratio_samples, confidence_level)
-        decision = "inconclusive"
         if seed_pairing_expected and not paired:
             reason = "paired mode requires matched seed labels; unpaired fallback disabled"
         elif seed_pairing_expected and pairing_rate < 0.8:
@@ -2269,7 +2250,7 @@ def build_sequential_state_rows(
         elif too_few_samples:
             reason = "too few runs"
         else:
-            reason = "scheduler disabled; use verdict"
+            reason = "not significant after correction"
         test_name = (
             "wilcoxon-signed-rank"
             if paired
@@ -2303,12 +2284,7 @@ def build_sequential_state_rows(
             "covers_baseline_ci_low": relcov_ci[0],
             "covers_baseline_ci_high": relcov_ci[1],
             "covers_baseline_ci_status": relcov_ci[2],
-            "cs_lower": cs_bounds[0],
-            "cs_upper": cs_bounds[1],
             "missing_count": 0,
-            "decision": decision,
-            "trials_spent": n_samples,
-            "trials_saved_vs_fixed_n": 0,
             "reason": reason,
         }
         rows.append({**base_row, "metric": "relscore"})
@@ -2376,37 +2352,19 @@ def build_sequential_state_rows(
         aggregate_verdict = "improvement"
     campaign_rows = [row for row in rows if row["metric"] == "relscore"]
 
-    directive = {
+    verdict_state = {
         "version": 1,
         "confidence_level": confidence_level,
         "relcov_floor": relcov_floor,
         "min_samples": min_samples,
         "aggregate": {
             "winner": "",
-            "decision": "inconclusive",
             "verdict": aggregate_verdict,
             "eligible_count": len(campaign_rows),
-            "eliminated_count": 0,
-            "total_campaigns_run": sum(int(row["trials_spent"]) for row in campaign_rows),
-            "fixed_n_equivalent": max_trials_per_arm * len(campaign_rows),
-            "trials_saved_vs_fixed_n": 0,
-            "automated_winner_enabled": False,
-            "note": "Scheduler decisions are disabled; use the verdict field for benchmark status.",
+            "total_samples": sum(int(row["n_samples"]) for row in campaign_rows),
         },
-        "schedule": [
-            {
-                "campaign": row["campaign"],
-                "arm": row["feature"],
-                "decision": row["decision"],
-                "next_seeds": [],
-                "next_targets": [],
-                "reason": row["reason"],
-            }
-            for row in rows
-            if row["metric"] == "relscore"
-        ],
     }
-    return rows, directive
+    return rows, verdict_state
 
 
 def build_differential_coverage_summary_rows(
@@ -2567,15 +2525,15 @@ def write_differential_coverage_outputs(
             writer.writerow([campaign_name, approach, reference, f"{relcov:.6f}"])
 
     summary_csv = out_dir / "differential_coverage_summary.csv"
-    sequential_rows, scheduling_directive = build_sequential_state_rows(
+    verdict_rows, verdict_state = build_differential_coverage_verdict_rows(
         summary_rows,
         campaigns,
         confidence_level=confidence_level,
         pairing_mode=pairing_mode,
         min_samples=min_samples,
     )
-    sequential_by_key = {
-        (row["campaign"], row["feature"], row["metric"]): row for row in sequential_rows
+    verdict_by_key = {
+        (row["campaign"], row["feature"], row["metric"]): row for row in verdict_rows
     }
     with summary_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -2613,12 +2571,7 @@ def write_differential_coverage_outputs(
                 "covers_baseline_ci_low",
                 "covers_baseline_ci_high",
                 "covers_baseline_ci_status",
-                "cs_lower",
-                "cs_upper",
                 "missing_count",
-                "decision",
-                "trials_spent",
-                "trials_saved_vs_fixed_n",
             ]
         )
         for source_row in summary_rows:
@@ -2634,58 +2587,53 @@ def write_differential_coverage_outputs(
                 relscore_ratio,
             ) = source_row
             for metric in ("relscore", "relcov"):
-                sequential = sequential_by_key.get((campaign_name, feature, metric), {})
+                verdict_row = verdict_by_key.get((campaign_name, feature, metric), {})
                 writer.writerow(
                     [
                         campaign_name,
                         metric,
                         baseline,
                         feature,
-                        sequential.get("verdict", "inconclusive"),
-                        sequential.get("reason", ""),
+                        verdict_row.get("verdict", "inconclusive"),
+                        verdict_row.get("reason", ""),
                         legacy_verdict,
                         f"{feature_covers_baseline:.6f}",
                         f"{baseline_covers_feature:.6f}",
                         f"{baseline_relscore:.6f}",
                         f"{feature_relscore:.6f}",
                         f"{relscore_ratio:.6f}",
-                        sequential.get("pairing_mode", pairing_mode),
-                        sequential.get("n_trials", ""),
-                        sequential.get("n_samples", ""),
-                        sequential.get("n_seeds", ""),
-                        str(sequential.get("paired", "")).lower(),
-                        f"{float(sequential.get('pairing_rate', 0.0)):.6f}" if sequential else "",
-                        str(sequential.get("too_few_samples", "")).lower(),
-                        sequential.get("test_name", ""),
-                        _format_csv_float(sequential.get("statistic", 0.0)) if sequential else "",
-                        _format_csv_float(sequential.get("p_value", 1.0)) if sequential else "",
-                        _format_csv_float(sequential.get("p_value_adjusted", 1.0)) if sequential else "",
-                        _format_csv_float(sequential.get("effect_size_a12", 0.5)) if sequential else "",
-                        _format_csv_float(sequential.get("baseline_sample_mean", 0.0)) if sequential else "",
-                        _format_csv_float(sequential.get("feature_sample_mean", 0.0)) if sequential else "",
-                        _format_csv_float(sequential.get("relscore_ratio_ci_low")) if sequential else "",
-                        _format_csv_float(sequential.get("relscore_ratio_ci_high")) if sequential else "",
-                        sequential.get("relscore_ratio_ci_status", ""),
-                        _format_csv_float(sequential.get("covers_baseline_ci_low")) if sequential else "",
-                        _format_csv_float(sequential.get("covers_baseline_ci_high")) if sequential else "",
-                        sequential.get("covers_baseline_ci_status", ""),
-                        _format_csv_float(sequential.get("cs_lower", relscore_ratio)) if sequential else "",
-                        _format_csv_float(sequential.get("cs_upper", relscore_ratio)) if sequential else "",
-                        sequential.get("missing_count", ""),
-                        sequential.get("decision", ""),
-                        sequential.get("trials_spent", ""),
-                        sequential.get("trials_saved_vs_fixed_n", ""),
+                        verdict_row.get("pairing_mode", pairing_mode),
+                        verdict_row.get("n_trials", ""),
+                        verdict_row.get("n_samples", ""),
+                        verdict_row.get("n_seeds", ""),
+                        str(verdict_row.get("paired", "")).lower(),
+                        f"{float(verdict_row.get('pairing_rate', 0.0)):.6f}" if verdict_row else "",
+                        str(verdict_row.get("too_few_samples", "")).lower(),
+                        verdict_row.get("test_name", ""),
+                        _format_csv_float(verdict_row.get("statistic", 0.0)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("p_value", 1.0)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("p_value_adjusted", 1.0)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("effect_size_a12", 0.5)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("baseline_sample_mean", 0.0)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("feature_sample_mean", 0.0)) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("relscore_ratio_ci_low")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("relscore_ratio_ci_high")) if verdict_row else "",
+                        verdict_row.get("relscore_ratio_ci_status", ""),
+                        _format_csv_float(verdict_row.get("covers_baseline_ci_low")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("covers_baseline_ci_high")) if verdict_row else "",
+                        verdict_row.get("covers_baseline_ci_status", ""),
+                        verdict_row.get("missing_count", ""),
                     ]
                 )
 
-    sequential_state_path = out_dir / "differential_coverage_sequential_state.json"
-    with sequential_state_path.open("w", encoding="utf-8") as handle:
+    statistics_path = out_dir / "differential_coverage_statistics.json"
+    with statistics_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
-                "schema": "scfuzzbench.differential_coverage.sequential_state.v1",
+                "schema": "scfuzzbench.differential_coverage.statistics.v1",
                 "pairing_mode": pairing_mode,
-                "rows": sequential_rows,
-                "scheduling_directive": scheduling_directive,
+                "rows": verdict_rows,
+                "state": verdict_state,
             },
             handle,
             indent=2,
