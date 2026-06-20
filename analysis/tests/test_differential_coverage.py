@@ -477,6 +477,112 @@ class DifferentialCoverageTests(unittest.TestCase):
             "regression",
         )
 
+    def test_sequential_state_eliminates_dominated_arm_and_saves_trials(self):
+        campaign = {
+            "master": {f"s{i}": {"a", "b", "c", "d"} for i in range(3)},
+            "pr-1": {f"s{i}": {"a"} for i in range(3)},
+        }
+        relscores = analyze.calculate_relscores(campaign)
+        relcovs = analyze.calculate_relcovs(campaign)
+        summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/aave", relscores, relcovs
+        )
+        rows, directive = analyze.build_sequential_state_rows(
+            summary, {"by_target/aave": campaign}, max_trials_per_arm=12
+        )
+        self.assertEqual(rows[0]["decision"], "eliminate")
+        self.assertGreater(rows[0]["trials_saved_vs_fixed_n"], 0)
+        self.assertEqual(directive["schedule"][0]["decision"], "eliminate")
+
+    def test_sequential_state_declares_clear_best_arm_early(self):
+        campaign = {
+            "master": {f"s{i}": {"a", "b", "c"} for i in range(4)},
+            "pr-1": {f"s{i}": {"a", "b", "c", f"x{i}", f"y{i}"} for i in range(4)},
+        }
+        relscores = analyze.calculate_relscores(campaign)
+        relcovs = analyze.calculate_relcovs(campaign)
+        summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/nerite", relscores, relcovs
+        )
+        rows, directive = analyze.build_sequential_state_rows(
+            summary, {"by_target/nerite": campaign}, max_trials_per_arm=12
+        )
+        self.assertEqual(rows[0]["decision"], "winner")
+        self.assertEqual(directive["aggregate"]["decision"], "winner")
+
+    def test_sequential_state_repeated_peeking_under_null_stays_inconclusive(self):
+        false_winners = 0
+        for run in range(50):
+            campaign = {
+                "master": {f"s{i}": {f"e{(i + run) % 5}", "shared"} for i in range(6)},
+                "pr-1": {f"s{i}": {f"e{(i + run) % 5}", "shared"} for i in range(6)},
+            }
+            relscores = analyze.calculate_relscores(campaign)
+            relcovs = analyze.calculate_relcovs(campaign)
+            summary = analyze.build_differential_coverage_summary_rows(
+                "by_target/null", relscores, relcovs
+            )
+            rows, _ = analyze.build_sequential_state_rows(
+                summary, {"by_target/null": campaign}, max_trials_per_arm=6
+            )
+            false_winners += int(rows[0]["decision"] == "winner")
+        self.assertLessEqual(false_winners / 50, 0.05)
+
+    def test_sequential_state_records_censoring_and_does_not_block(self):
+        campaign = {
+            "master": {"s1": {"a", "b"}, "s2": {"a", "b"}},
+            "pr-1": {"s1": {"a", "b"}, "s2": {"a", "b", "c"}},
+        }
+        relscores = analyze.calculate_relscores(campaign)
+        relcovs = analyze.calculate_relcovs(campaign)
+        summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/slow", relscores, relcovs
+        )
+        rows, _ = analyze.build_sequential_state_rows(summary, {"by_target/slow": campaign})
+        self.assertIn(rows[0]["decision"], {"continue", "winner", "inconclusive"})
+        self.assertEqual(rows[0]["censored_count"], 0)
+
+    def test_sequential_state_models_confirmation_cache_reuse(self):
+        campaign = {
+            "master": {"s1": {"a", "b"}, "s2": {"a", "b"}},
+            "pr-1": {"s1": {"a", "b", "c"}, "s2": {"a", "b", "d"}},
+        }
+        relscores = analyze.calculate_relscores(campaign)
+        relcovs = analyze.calculate_relcovs(campaign)
+        summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/aave", relscores, relcovs
+        )
+        rows, directive = analyze.build_sequential_state_rows(
+            summary, {"by_target/aave": campaign}, max_trials_per_arm=3
+        )
+        self.assertEqual(rows[0]["trials_spent"], 2)
+        if rows[0]["decision"] == "continue":
+            self.assertEqual(directive["schedule"][0]["next_seeds"], ["next-wave"])
+
+    def test_sequential_state_exercises_paired_and_unpaired_paths(self):
+        paired = {
+            "master": {"s1": {"a"}, "s2": {"a"}},
+            "pr-1": {"s1": {"a", "b"}, "s2": {"a", "c"}},
+        }
+        unpaired = {
+            "master": {"m1": {"a"}, "m2": {"a"}},
+            "pr-1": {"p1": {"a", "b"}, "p2": {"a", "c"}},
+        }
+        paired_summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/paired", analyze.calculate_relscores(paired), analyze.calculate_relcovs(paired)
+        )
+        unpaired_summary = analyze.build_differential_coverage_summary_rows(
+            "by_target/unpaired", analyze.calculate_relscores(unpaired), analyze.calculate_relcovs(unpaired)
+        )
+        paired_rows, _ = analyze.build_sequential_state_rows(
+            paired_summary, {"by_target/paired": paired}
+        )
+        unpaired_rows, _ = analyze.build_sequential_state_rows(
+            unpaired_summary, {"by_target/unpaired": unpaired}
+        )
+        self.assertTrue(paired_rows[0]["paired"])
+        self.assertFalse(unpaired_rows[0]["paired"])
+
     def test_combined_is_not_a_suite_name_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

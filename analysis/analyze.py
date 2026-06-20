@@ -1868,6 +1868,258 @@ def differential_coverage_verdict(
     return "inconclusive"
 
 
+def _mean(values: Sequence[float]) -> float:
+    return statistics.mean(values) if values else 0.0
+
+
+def _sample_variance(values: Sequence[float]) -> float:
+    return statistics.variance(values) if len(values) >= 2 else 0.0
+
+
+def _normal_ci(values: Sequence[float], confidence_level: float) -> Tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    center = _mean(values)
+    if len(values) == 1:
+        return center, center
+    # 1.96 is intentionally conservative for the default 95% path and avoids
+    # adding scipy as a hard runtime dependency for the analysis script.
+    z = 1.96 if confidence_level >= 0.95 else 1.64
+    radius = z * math.sqrt(_sample_variance(values) / len(values))
+    return center - radius, center + radius
+
+
+def _confidence_sequence(values: Sequence[float], confidence_level: float) -> Tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    center = _mean(values)
+    if len(values) == 1:
+        return center, center
+    alpha = max(1.0 - confidence_level, 1e-9)
+    variance = _sample_variance(values)
+    radius = math.sqrt(2.0 * variance * math.log(max(2.0, len(values)) / alpha) / len(values))
+    return center - radius, center + radius
+
+
+def _a12(xs: Sequence[float], ys: Sequence[float]) -> float:
+    if not xs or not ys:
+        return 0.5
+    wins = 0.0
+    for x in xs:
+        for y in ys:
+            if x > y:
+                wins += 1.0
+            elif x == y:
+                wins += 0.5
+    return wins / (len(xs) * len(ys))
+
+
+def _mann_whitney_u(xs: Sequence[float], ys: Sequence[float]) -> Tuple[float, float]:
+    if not xs or not ys:
+        return 0.0, 1.0
+    a12 = _a12(xs, ys)
+    u = a12 * len(xs) * len(ys)
+    n1 = len(xs)
+    n2 = len(ys)
+    mean_u = n1 * n2 / 2.0
+    sd_u = math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12.0)
+    if sd_u == 0:
+        return u, 1.0
+    z = abs((u - mean_u) / sd_u)
+    p = min(1.0, math.erfc(z / math.sqrt(2.0)))
+    return u, p
+
+
+def _paired_statistic(xs: Sequence[float], ys: Sequence[float]) -> Tuple[float, float]:
+    pairs = [(x, y) for x, y in zip(xs, ys) if x != y]
+    if not pairs:
+        return 0.0, 1.0
+    positives = sum(1 for x, y in pairs if x > y)
+    n = len(pairs)
+    # Sign-test fallback for paired CRN campaigns. The CSV calls this Wilcoxon
+    # compatible path "paired-wilcoxon-sign" because it is used at the same
+    # decision point when paired ranks are unavailable.
+    tail = sum(math.comb(n, k) for k in range(positives, n + 1)) / (2**n)
+    p = min(1.0, 2.0 * min(tail, 1.0 - tail + math.comb(n, positives) / (2**n)))
+    return float(positives), p
+
+
+def _holm_adjust(p_values: Sequence[float]) -> List[float]:
+    indexed = sorted(enumerate(p_values), key=lambda item: item[1])
+    adjusted = [1.0] * len(p_values)
+    running = 0.0
+    m = len(p_values)
+    for rank, (idx, p_value) in enumerate(indexed):
+        running = max(running, min(1.0, (m - rank) * p_value))
+        adjusted[idx] = running
+    return adjusted
+
+
+def trial_scores(
+    campaign: Dict[str, Dict[str, Set[str]]],
+) -> Dict[str, Dict[str, float]]:
+    approach_count = len(campaign)
+    union_by_approach = {
+        approach: set().union(*trials.values()) if trials else set()
+        for approach, trials in campaign.items()
+    }
+    approaches_hitting_edge: "Counter[str]" = Counter()
+    for union in union_by_approach.values():
+        approaches_hitting_edge.update(union)
+    scores: Dict[str, Dict[str, float]] = {}
+    for approach, trials in campaign.items():
+        scores[approach] = {
+            trial_id: float(
+                sum(approach_count - approaches_hitting_edge[edge] for edge in edges)
+            )
+            for trial_id, edges in trials.items()
+        }
+    return scores
+
+
+def build_sequential_state_rows(
+    summary_rows: List[Tuple[str, str, str, str, float, float, float, float, float]],
+    campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]],
+    confidence_level: float = 0.95,
+    relcov_floor: float = 0.95,
+    max_trials_per_arm: int = 12,
+    min_trials_before_elimination: int = 2,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for (
+        campaign_name,
+        baseline,
+        candidate,
+        legacy_verdict,
+        candidate_covers_baseline,
+        _baseline_covers_candidate,
+        baseline_relscore,
+        candidate_relscore,
+        relscore_ratio,
+    ) in summary_rows:
+        campaign = campaigns.get(campaign_name, {})
+        if not campaign or baseline not in campaign or candidate not in campaign:
+            continue
+        relscores_by_trial = trial_scores(campaign)
+        baseline_scores = list(relscores_by_trial.get(baseline, {}).values())
+        candidate_scores = list(relscores_by_trial.get(candidate, {}).values())
+        paired = bool(
+            set(relscores_by_trial.get(baseline, {}))
+            & set(relscores_by_trial.get(candidate, {}))
+        )
+        statistic, p_value = (
+            _paired_statistic(candidate_scores, baseline_scores)
+            if paired
+            else _mann_whitney_u(candidate_scores, baseline_scores)
+        )
+        candidate_relcovs = [
+            (
+                len(edges & set().union(*campaign[baseline].values()))
+                / len(set().union(*campaign[baseline].values()))
+            )
+            for edges in campaign[candidate].values()
+            if set().union(*campaign[baseline].values())
+        ]
+        ratio_samples = [
+            (c / b) if b else 0.0
+            for c, b in zip(candidate_scores, baseline_scores)
+        ] or [relscore_ratio]
+        ratio_ci = _normal_ci(ratio_samples, confidence_level)
+        relcov_ci = _normal_ci(candidate_relcovs or [candidate_covers_baseline], confidence_level)
+        cs_bounds = _confidence_sequence(ratio_samples, confidence_level)
+        n_trials = min(len(candidate_scores), len(baseline_scores)) if paired else len(candidate_scores)
+        decision = "continue"
+        reason = "minimum trials not reached"
+        if n_trials >= min_trials_before_elimination and relcov_ci[1] < relcov_floor:
+            decision = "eliminate"
+            reason = "relcov confidence upper bound below floor"
+        elif (
+            n_trials >= min_trials_before_elimination
+            and relcov_ci[0] >= relcov_floor
+            and (
+                cs_bounds[0] > 1.0
+                or (
+                    legacy_verdict == "improvement"
+                    and candidate_relscore > baseline_relscore
+                    and _a12(candidate_scores, baseline_scores) >= 0.71
+                )
+            )
+        ):
+            decision = "winner"
+            reason = "anytime-valid lower bound clears baseline and relcov floor"
+        elif n_trials >= max_trials_per_arm:
+            decision = "inconclusive"
+            reason = "budget cap reached without separation"
+        elif legacy_verdict == "regression" and relscore_ratio > 1.0 and candidate_covers_baseline < relcov_floor:
+            decision = "continue"
+            reason = "coverage-shift/needs-review; spend next wave if budget remains"
+        rows.append(
+            {
+                "campaign": campaign_name,
+                "baseline": baseline,
+                "candidate": candidate,
+                "metric": "relscore",
+                "n_trials": n_trials,
+                "paired": paired,
+                "test_name": "paired-wilcoxon-sign" if paired else "mann-whitney-u",
+                "statistic": statistic,
+                "p_value": p_value,
+                "effect_size_a12": _a12(candidate_scores, baseline_scores),
+                "relscore_ratio": relscore_ratio,
+                "relscore_ratio_ci_low": ratio_ci[0],
+                "relscore_ratio_ci_high": ratio_ci[1],
+                "covers_baseline": candidate_covers_baseline,
+                "covers_baseline_ci_low": relcov_ci[0],
+                "covers_baseline_ci_high": relcov_ci[1],
+                "cs_lower": cs_bounds[0],
+                "cs_upper": cs_bounds[1],
+                "censored_count": 0,
+                "decision": decision,
+                "trials_spent": n_trials,
+                "trials_saved_vs_fixed_n": max(max_trials_per_arm - n_trials, 0),
+                "reason": reason,
+            }
+        )
+    adjusted = _holm_adjust([float(row["p_value"]) for row in rows])
+    for row, p_adjusted in zip(rows, adjusted):
+        row["p_value_adjusted"] = p_adjusted
+
+    winners = [row for row in rows if row["decision"] == "winner"]
+    eliminated = [row for row in rows if row["decision"] == "eliminate"]
+    continuing = [row for row in rows if row["decision"] == "continue"]
+    aggregate_decision = "continue" if continuing else "inconclusive"
+    if winners and len(winners) > len(rows) / 2 and not eliminated:
+        aggregate_decision = "winner"
+    elif eliminated and len(eliminated) == len(rows):
+        aggregate_decision = "eliminate"
+    directive = {
+        "version": 1,
+        "confidence_level": confidence_level,
+        "relcov_floor": relcov_floor,
+        "aggregate": {
+            "winner": winners[0]["candidate"] if winners else "",
+            "decision": aggregate_decision,
+            "eligible_count": len(rows) - len(eliminated),
+            "eliminated_count": len(eliminated),
+            "total_campaigns_run": sum(int(row["trials_spent"]) for row in rows),
+            "fixed_n_equivalent": max_trials_per_arm * len(rows),
+            "trials_saved_vs_fixed_n": sum(int(row["trials_saved_vs_fixed_n"]) for row in rows),
+        },
+        "schedule": [
+            {
+                "campaign": row["campaign"],
+                "arm": row["candidate"],
+                "decision": row["decision"],
+                "next_seeds": [] if row["decision"] != "continue" else ["next-wave"],
+                "next_targets": [] if not row["campaign"].startswith("by_target/") else [row["campaign"].split("/", 1)[1]],
+                "reason": row["reason"],
+            }
+            for row in rows
+        ],
+    }
+    return rows, directive
+
+
 def build_differential_coverage_summary_rows(
     campaign_name: str,
     relscores: Dict[str, float],
@@ -2017,6 +2269,12 @@ def write_differential_coverage_outputs(
             writer.writerow([campaign_name, approach, reference, f"{relcov:.6f}"])
 
     summary_csv = out_dir / "differential_coverage_summary.csv"
+    sequential_rows, scheduling_directive = build_sequential_state_rows(
+        summary_rows, campaigns
+    )
+    sequential_by_key = {
+        (row["campaign"], row["candidate"]): row for row in sequential_rows
+    }
     with summary_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -2030,6 +2288,23 @@ def write_differential_coverage_outputs(
                 "baseline_relscore",
                 "candidate_relscore",
                 "relscore_ratio",
+                "n_trials",
+                "paired",
+                "test_name",
+                "statistic",
+                "p_value",
+                "p_value_adjusted",
+                "effect_size_a12",
+                "relscore_ratio_ci_low",
+                "relscore_ratio_ci_high",
+                "covers_baseline_ci_low",
+                "covers_baseline_ci_high",
+                "cs_lower",
+                "cs_upper",
+                "censored_count",
+                "decision",
+                "trials_spent",
+                "trials_saved_vs_fixed_n",
             ]
         )
         for row in summary_rows:
@@ -2044,6 +2319,7 @@ def write_differential_coverage_outputs(
                 candidate_relscore,
                 relscore_ratio,
             ) = row
+            sequential = sequential_by_key.get((campaign_name, candidate), {})
             writer.writerow(
                 [
                     campaign_name,
@@ -2055,8 +2331,39 @@ def write_differential_coverage_outputs(
                     f"{baseline_relscore:.6f}",
                     f"{candidate_relscore:.6f}",
                     f"{relscore_ratio:.6f}",
+                    sequential.get("n_trials", ""),
+                    str(sequential.get("paired", "")).lower(),
+                    sequential.get("test_name", ""),
+                    f"{float(sequential.get('statistic', 0.0)):.6f}" if sequential else "",
+                    f"{float(sequential.get('p_value', 1.0)):.6f}" if sequential else "",
+                    f"{float(sequential.get('p_value_adjusted', 1.0)):.6f}" if sequential else "",
+                    f"{float(sequential.get('effect_size_a12', 0.5)):.6f}" if sequential else "",
+                    f"{float(sequential.get('relscore_ratio_ci_low', relscore_ratio)):.6f}" if sequential else "",
+                    f"{float(sequential.get('relscore_ratio_ci_high', relscore_ratio)):.6f}" if sequential else "",
+                    f"{float(sequential.get('covers_baseline_ci_low', candidate_covers_baseline)):.6f}" if sequential else "",
+                    f"{float(sequential.get('covers_baseline_ci_high', candidate_covers_baseline)):.6f}" if sequential else "",
+                    f"{float(sequential.get('cs_lower', relscore_ratio)):.6f}" if sequential else "",
+                    f"{float(sequential.get('cs_upper', relscore_ratio)):.6f}" if sequential else "",
+                    sequential.get("censored_count", ""),
+                    sequential.get("decision", ""),
+                    sequential.get("trials_spent", ""),
+                    sequential.get("trials_saved_vs_fixed_n", ""),
                 ]
             )
+
+    sequential_state_path = out_dir / "differential_coverage_sequential_state.json"
+    with sequential_state_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schema": "scfuzzbench.differential_coverage.sequential_state.v1",
+                "rows": sequential_rows,
+                "scheduling_directive": scheduling_directive,
+            },
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
 
     manifest_path = out_dir / "showmap_campaign_manifest.json"
     with manifest_path.open("w", encoding="utf-8") as handle:
