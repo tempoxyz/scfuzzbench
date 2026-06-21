@@ -28,6 +28,13 @@ build_target
 
 repo_dir="${SCFUZZBENCH_WORKDIR}/target"
 log_file="${SCFUZZBENCH_LOG_DIR}/foundry.log"
+default_corpus_dir="${repo_dir}/corpus/foundry"
+corpus_dir="${FOUNDRY_CORPUS_DIR:-${default_corpus_dir}}"
+if [[ "${corpus_dir}" != /* ]]; then
+  corpus_dir="${repo_dir}/${corpus_dir}"
+fi
+export SCFUZZBENCH_CORPUS_DIR="${corpus_dir}"
+mkdir -p "${SCFUZZBENCH_CORPUS_DIR}"
 
 extra_args=()
 if [[ -n "${FOUNDRY_TEST_ARGS:-}" ]]; then
