@@ -44,6 +44,19 @@ apply_benchmark_type() {{ :; }}
 build_target() {{ :; }}
 set_default_worker_env() {{ :; }}
 log() {{ printf '%s\\n' "$*" >> "${{SCFUZZBENCH_LOG_DIR}}/log.txt"; }}
+require_env() {{ for name in "$@"; do if [[ -z "${{!name:-}}" ]]; then return 1; fi; done; }}
+now_epoch_seconds() {{ date +%s; }}
+log_duration() {{ :; }}
+append_runner_command_log() {{
+  timeout_seconds=$1
+  grace_seconds=$2
+  shift 2
+  {{
+    printf 'APPEND\\t%s\\t%s' "${{timeout_seconds}}" "${{grace_seconds}}"
+    for arg in "$@"; do printf '\\t%s' "$arg"; done
+    printf '\\n'
+  }} >> "${{SCFUZZBENCH_LOG_DIR}}/commands.tsv"
+}}
 upload_results() {{ {upload_body}; }}
 run_with_timeout() {{
   log_file=$1
@@ -101,9 +114,13 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
 
             showmap_out_idx = replay_args.index("--showmap-out")
             showmap_trial_idx = replay_args.index("--showmap-trial")
+            showmap_corpus_idx = replay_args.index("--showmap-corpus-dir")
             self.assertEqual(replay_args[showmap_out_idx + 1], str(log_dir / "showmap"))
             self.assertEqual(replay_args[showmap_trial_idx + 1], "bench-trial")
-            self.assertNotIn("--showmap-corpus-dir", replay_args)
+            self.assertEqual(
+                replay_args[showmap_corpus_idx + 1],
+                str(work_dir / "target" / "corpus" / "foundry"),
+            )
 
     def test_showmap_replay_uses_explicit_corpus_override_only_when_set(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,6 +189,88 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
         explicit_override = run_case("86400", "42")
         self.assertEqual(explicit_override[0][1], "86400")
         self.assertEqual(explicit_override[1][1], "42")
+
+    def test_samply_wraps_forge_in_inner_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            log_dir = tmp_dir / "logs"
+            work_dir = tmp_dir / "work"
+            profile_dir = tmp_dir / "profiles"
+            fake_bin = tmp_dir / "bin"
+            fake_bin.mkdir()
+            common_sh = write_common_sh(tmp_dir)
+
+            samply = fake_bin / "samply"
+            samply.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" > "${SCFUZZBENCH_LOG_DIR}/samply_args.txt"
+out=""
+previous=""
+for arg in "$@"; do
+  if [[ "${previous}" == "--output" ]]; then
+    out="${arg}"
+    break
+  fi
+  previous="${arg}"
+done
+if [[ -n "${out}" ]]; then
+  mkdir -p "$(dirname "${out}")"
+  printf 'profile' > "${out}"
+fi
+printf 'fake samply\\n'
+""",
+                encoding="utf-8",
+            )
+            samply.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{fake_bin}:{env['PATH']}",
+                    "SCFUZZBENCH_COMMON_SH": str(common_sh),
+                    "SCFUZZBENCH_WORKDIR": str(work_dir),
+                    "SCFUZZBENCH_LOG_DIR": str(log_dir),
+                    "SCFUZZBENCH_RUN_ID": "bench-trial",
+                    "SCFUZZBENCH_TIMEOUT_SECONDS": "17",
+                    "SCFUZZBENCH_TIMEOUT_GRACE_SECONDS": "9",
+                    "SCFUZZBENCH_FOUNDRY_SHOWMAP": "0",
+                    "FOUNDRY_LABEL": "foundry-master",
+                    "FOUNDRY_SAMPLY_DIR": str(profile_dir),
+                }
+            )
+
+            subprocess.check_call(["bash", str(SCRIPT)], env=env)
+
+            args = (log_dir / "samply_args.txt").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(
+                args[:5],
+                [
+                    "record",
+                    "--save-only",
+                    "--presymbolicate",
+                    "--output",
+                    str(profile_dir / "profile-foundry.json.gz"),
+                ],
+            )
+
+            timeout_idx = args.index("timeout")
+            self.assertEqual(
+                args[timeout_idx : timeout_idx + 8],
+                [
+                    "timeout",
+                    "--signal=SIGINT",
+                    "--kill-after=9s",
+                    "17s",
+                    "forge",
+                    "test",
+                    "--mc",
+                    "CryticToFoundry",
+                ],
+            )
+            self.assertTrue((profile_dir / "profile-foundry.json.gz").exists())
+            comment = (profile_dir / "comment.md").read_text(encoding="utf-8")
+            self.assertIn("profile-foundry.json.gz", comment)
 
     def test_showmap_and_upload_run_after_main_forge_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

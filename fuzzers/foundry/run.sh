@@ -26,6 +26,42 @@ clone_target
 apply_benchmark_type
 build_target
 
+run_with_samply_timeout() {
+  require_env SCFUZZBENCH_TIMEOUT_SECONDS FOUNDRY_SAMPLY_DIR
+  local log_file=$1
+  shift
+  local run_start
+  run_start=$(now_epoch_seconds)
+  local kill_after="${SCFUZZBENCH_TIMEOUT_GRACE_SECONDS:-300}"
+  if [[ ! "${kill_after}" =~ ^[0-9]+$ ]]; then
+    kill_after=300
+  fi
+
+  mkdir -p "${FOUNDRY_SAMPLY_DIR}"
+  local -a samply_args=(--save-only --presymbolicate --output "${FOUNDRY_SAMPLY_DIR}/profile-foundry.json.gz")
+  if [[ -n "${FOUNDRY_SAMPLY_ARGS:-}" ]]; then
+    local -a configured_samply_args
+    read -r -a configured_samply_args <<< "${FOUNDRY_SAMPLY_ARGS}"
+    samply_args=("${configured_samply_args[@]}" "${samply_args[@]}")
+  fi
+
+  # Keep samply outside the benchmark timeout process group so it can flush the
+  # profile after timeout interrupts forge.
+  local -a timed_cmd=(timeout --signal=SIGINT --kill-after="${kill_after}s" "${SCFUZZBENCH_TIMEOUT_SECONDS}s" "$@")
+  append_runner_command_log "${SCFUZZBENCH_TIMEOUT_SECONDS}" "${kill_after}" samply record "${samply_args[@]}" "${timed_cmd[@]}" || true
+  log "Running command under samply with timeout ${SCFUZZBENCH_TIMEOUT_SECONDS}s (grace ${kill_after}s)"
+  set +e
+  samply record "${samply_args[@]}" "${timed_cmd[@]}" 2>&1 | tee "${log_file}"
+  local exit_code=${PIPESTATUS[0]}
+  set -e
+  log_duration "run_with_samply_timeout $(basename "${log_file}")" "${run_start}"
+  if [[ "${exit_code}" -eq 124 ]]; then
+    log "Command reached configured benchmark timeout; treating as completed run"
+    return 0
+  fi
+  return ${exit_code}
+}
+
 repo_dir="${SCFUZZBENCH_WORKDIR}/target"
 log_file="${SCFUZZBENCH_LOG_DIR}/foundry.log"
 default_corpus_dir="${repo_dir}/corpus/foundry"
@@ -57,24 +93,23 @@ if [[ -n "${FOUNDRY_THREADS:-}" ]]; then
   fi
 fi
 
-forge_cmd=(forge test --mc CryticToFoundry "${extra_args[@]}")
-if [[ -n "${FOUNDRY_SAMPLY_DIR:-}" ]]; then
-  mkdir -p "${FOUNDRY_SAMPLY_DIR}"
-  samply_args=(--save-only --presymbolicate --output "${FOUNDRY_SAMPLY_DIR}/profile-foundry.json.gz")
-  if [[ -n "${FOUNDRY_SAMPLY_ARGS:-}" ]]; then
-    read -r -a configured_samply_args <<< "${FOUNDRY_SAMPLY_ARGS}"
-    samply_args=("${configured_samply_args[@]}" "${samply_args[@]}")
-  fi
-  forge_cmd=(samply record "${samply_args[@]}" "${forge_cmd[@]}")
+forge_cmd=(forge test --mc CryticToFoundry)
+if ((${#extra_args[@]})); then
+  forge_cmd+=("${extra_args[@]}")
 fi
 
 set +e
 pushd "${repo_dir}" >/dev/null
 exit_code=0
-run_with_timeout "${log_file}" "${forge_cmd[@]}" || exit_code=$?
+if [[ -n "${FOUNDRY_SAMPLY_DIR:-}" ]]; then
+  run_with_samply_timeout "${log_file}" "${forge_cmd[@]}" || exit_code=$?
+else
+  run_with_timeout "${log_file}" "${forge_cmd[@]}" || exit_code=$?
+fi
 
 showmap_enabled="${SCFUZZBENCH_FOUNDRY_SHOWMAP:-1}"
-if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${showmap_enabled,,}" == "yes" ]]; then
+showmap_enabled_lc=$(printf '%s' "${showmap_enabled}" | tr '[:upper:]' '[:lower:]')
+if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${showmap_enabled_lc}" == "yes" ]]; then
   showmap_dir="${SCFUZZBENCH_LOG_DIR}/showmap"
   showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
   showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
@@ -102,23 +137,30 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled,,}" == "true" || "${show
   SCFUZZBENCH_TIMEOUT_SECONDS="${showmap_timeout}"
   replay_extra_args=()
   skip_showmap_arg_value=0
-  for arg in "${extra_args[@]}"; do
-    if [[ "${skip_showmap_arg_value}" -eq 1 ]]; then
-      skip_showmap_arg_value=0
-      continue
-    fi
-    case "${arg}" in
-      --showmap-out|--showmap-approach|--showmap-trial|--showmap-corpus-dir|--showmap-domain)
-        skip_showmap_arg_value=1
-        ;;
-      --showmap-out=*|--showmap-approach=*|--showmap-trial=*|--showmap-corpus-dir=*|--showmap-domain=*)
-        ;;
-      *)
-        replay_extra_args+=("${arg}")
-        ;;
-    esac
-  done
-  run_with_timeout "${showmap_log_file}" forge test --mc CryticToFoundry "${replay_extra_args[@]}" "${showmap_args[@]}" || \
+  if ((${#extra_args[@]})); then
+    for arg in "${extra_args[@]}"; do
+      if [[ "${skip_showmap_arg_value}" -eq 1 ]]; then
+        skip_showmap_arg_value=0
+        continue
+      fi
+      case "${arg}" in
+        --showmap-out|--showmap-approach|--showmap-trial|--showmap-corpus-dir|--showmap-domain)
+          skip_showmap_arg_value=1
+          ;;
+        --showmap-out=*|--showmap-approach=*|--showmap-trial=*|--showmap-corpus-dir=*|--showmap-domain=*)
+          ;;
+        *)
+          replay_extra_args+=("${arg}")
+          ;;
+      esac
+    done
+  fi
+  showmap_cmd=(forge test --mc CryticToFoundry)
+  if ((${#replay_extra_args[@]})); then
+    showmap_cmd+=("${replay_extra_args[@]}")
+  fi
+  showmap_cmd+=("${showmap_args[@]}")
+  run_with_timeout "${showmap_log_file}" "${showmap_cmd[@]}" || \
     log "Foundry showmap replay failed; continuing with original forge test exit code ${exit_code}."
   if [[ -n "${original_timeout}" ]]; then
     SCFUZZBENCH_TIMEOUT_SECONDS="${original_timeout}"
