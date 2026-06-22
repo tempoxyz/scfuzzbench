@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from differential_coverage import ApproachData, DifferentialCoverage
+from differential_coverage import DifferentialCoverage
 from scipy import stats
 
 
@@ -1791,19 +1791,49 @@ def showmap_campaign_work_items(campaign: Dict[str, Dict[str, Set[str]]]) -> int
 def calculate_relscores(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, float]:
+    return _calculate_relscores_from_dc(DifferentialCoverage(campaign))
+
+
+def _calculate_relscores_from_dc(
+    dc: DifferentialCoverage[str, str, str],
+) -> Dict[str, float]:
     return {
         approach: float(score)
-        for approach, score in DifferentialCoverage(campaign).relscores().items()
+        for approach, score in dc.relscores().items()
     }
 
 
 def calculate_relcovs(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, Dict[str, float]]:
-    dc = DifferentialCoverage(campaign)
+    return _calculate_relcovs_from_dc(DifferentialCoverage(campaign))
+
+
+def _calculate_relcovs_from_dc(
+    dc: DifferentialCoverage[str, str, str],
+) -> Dict[str, Dict[str, float]]:
+    trials_by_approach = {
+        approach: data.edges_by_trial for approach, data in dc.approaches.items()
+    }
+    union_by_approach = {
+        approach: data.edges_union for approach, data in dc.approaches.items()
+    }
+
+    def relcov_against(
+        approach: str,
+        reference: str,
+    ) -> float:
+        reference_union = union_by_approach[reference]
+        denominator = len(reference_union)
+        values = [
+            len(edges.intersection(reference_union)) / denominator
+            for edges in trials_by_approach[approach].values()
+        ]
+        return float(statistics.median(values))
+
     return {
         approach: {
-            reference: float(dc.approaches[approach].relcov(dc.approaches[reference]))
+            reference: relcov_against(approach, reference)
             for reference in dc.approaches
         }
         for approach in dc.approaches
@@ -2041,17 +2071,19 @@ def _relcov_samples(
     if not reference_data.edges_union:
         return []
     trials = dc.approaches[approach].edges_by_trial
+    reference_union = reference_data.edges_union
+    denominator = len(reference_union)
     ids = list(sample_ids) if sample_ids is not None else list(trials.keys())
 
     samples: List[float] = []
     for trial_id in ids:
         if trial_id not in trials:
             continue
-        edges = set(trials[trial_id])
+        edges = trials[trial_id]
         if not edges:
             samples.append(0.0)
             continue
-        samples.append(float(ApproachData({trial_id: edges}).relcov(reference_data)))
+        samples.append(len(edges.intersection(reference_union)) / denominator)
     return samples
 
 
@@ -2178,6 +2210,9 @@ def build_differential_coverage_verdict_rows(
     noninferiority_delta: float = DEFAULT_RELCOV_NONINFERIORITY_DELTA,
     pairing_mode: str = "unpaired",
     min_samples: int = DEFAULT_MIN_VERDICT_SAMPLES,
+    coverage_by_campaign: Optional[
+        Dict[str, DifferentialCoverage[str, str, str]]
+    ] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     if pairing_mode not in {"unpaired", "paired"}:
         raise ValueError(f"unsupported differential coverage pairing mode: {pairing_mode}")
@@ -2192,7 +2227,13 @@ def build_differential_coverage_verdict_rows(
         campaign = campaigns.get(campaign_name, {})
         if not campaign or baseline not in campaign or feature not in campaign:
             continue
-        dc = DifferentialCoverage(campaign)
+        dc = (
+            coverage_by_campaign.get(campaign_name)
+            if coverage_by_campaign is not None
+            else None
+        )
+        if dc is None:
+            dc = DifferentialCoverage(campaign)
         feature_performance = float(dc.approaches[feature].relcov(dc.approaches[baseline]))
         baseline_reliability = float(dc.approaches[baseline].relcov(dc.approaches[baseline]))
         relscores_by_sample = per_sample_relscores(campaign)
@@ -2515,6 +2556,7 @@ def write_differential_coverage_outputs(
     relscore_rows: List[Tuple[str, str, float, int, int]] = []
     relcov_rows: List[Tuple[str, str, str, float]] = []
     summary_rows: List[Tuple[str, str, str, float, float]] = []
+    coverage_by_campaign: Dict[str, DifferentialCoverage[str, str, str]] = {}
     manifest: Dict[str, Any] = {
         "raw_trials": len(trials),
         "skipped": skipped,
@@ -2528,8 +2570,6 @@ def write_differential_coverage_outputs(
         if not campaign:
             continue
         start = time.perf_counter()
-        campaign_dir = campaign_root / campaign_name
-        write_showmap_campaign_dir(campaign, campaign_dir)
         summary = showmap_campaign_summary(campaign)
         work_items = showmap_campaign_work_items(campaign)
         manifest["campaigns"][campaign_name] = {
@@ -2541,7 +2581,11 @@ def write_differential_coverage_outputs(
                 f"work_items {work_items} exceeds max_work_items {max_work_items}"
             )
             continue
-        relscores = calculate_relscores(campaign)
+        campaign_dir = campaign_root / campaign_name
+        write_showmap_campaign_dir(campaign, campaign_dir)
+        dc = DifferentialCoverage(campaign)
+        coverage_by_campaign[campaign_name] = dc
+        relscores = _calculate_relscores_from_dc(dc)
         for approach, score in sorted(
             relscores.items(), key=lambda item: (-item[1], item[0])
         ):
@@ -2554,7 +2598,7 @@ def write_differential_coverage_outputs(
                     summary[approach]["covered_edges"],
                 )
             )
-        relcovs = calculate_relcovs(campaign)
+        relcovs = _calculate_relcovs_from_dc(dc)
         for approach, references in sorted(relcovs.items()):
             for reference, relcov in sorted(references.items()):
                 if approach == reference:
@@ -2592,6 +2636,7 @@ def write_differential_coverage_outputs(
         pairing_mode=pairing_mode,
         min_samples=min_samples,
         noninferiority_delta=noninferiority_delta,
+        coverage_by_campaign=coverage_by_campaign,
     )
     verdict_by_key = {
         (row["campaign"], row["feature"], row["metric"]): row for row in verdict_rows

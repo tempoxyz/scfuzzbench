@@ -4,6 +4,7 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from analysis import analyze
 
@@ -239,6 +240,79 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(manifest["skipped"], [])
             self.assertIn("combined", manifest["campaigns"])
             self.assertIn("work_items", manifest["campaigns"]["combined"])
+
+    def test_skipped_showmap_campaigns_are_not_materialized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master_showmap = (
+                root
+                / "logs"
+                / "i-aaa-foundry-master__target-large"
+                / "showmap"
+                / "foundry-master"
+            )
+            feature_showmap = (
+                root
+                / "logs"
+                / "i-bbb-foundry-feature__target-large"
+                / "showmap"
+                / "foundry-feature"
+            )
+            master_showmap.mkdir(parents=True)
+            feature_showmap.mkdir(parents=True)
+            (master_showmap / "trial-1.txt").write_text("1:1\n2:1\n", encoding="utf-8")
+            (feature_showmap / "trial-1.txt").write_text("2:1\n3:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(
+                root / "logs",
+                out_dir,
+                max_work_items=1,
+            )
+
+            self.assertTrue((out_dir / "showmap_campaigns" / "combined").exists())
+            self.assertFalse((out_dir / "showmap_campaigns" / "by_target").exists())
+            manifest = json.loads(
+                (out_dir / "showmap_campaign_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("skipped_analysis", manifest["campaigns"]["by_target/large"])
+
+    def test_reuses_differential_coverage_for_verdict_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master_showmap = (
+                root
+                / "logs"
+                / "i-aaa-foundry-master"
+                / "showmap"
+                / "foundry-master"
+            )
+            feature_showmap = (
+                root
+                / "logs"
+                / "i-bbb-foundry-feature"
+                / "showmap"
+                / "foundry-feature"
+            )
+            master_showmap.mkdir(parents=True)
+            feature_showmap.mkdir(parents=True)
+            (master_showmap / "trial-1.txt").write_text("1:1\n2:1\n", encoding="utf-8")
+            (feature_showmap / "trial-1.txt").write_text("2:1\n3:1\n", encoding="utf-8")
+
+            real_differential_coverage = analyze.DifferentialCoverage
+            with mock.patch.object(
+                analyze,
+                "DifferentialCoverage",
+                side_effect=real_differential_coverage,
+            ) as differential_coverage_factory:
+                analyze.write_differential_coverage_outputs(
+                    root / "logs",
+                    root / "out",
+                )
+
+            self.assertEqual(1, differential_coverage_factory.call_count)
 
     def test_excludes_filtered_fuzzers_from_showmap_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
