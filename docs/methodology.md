@@ -143,7 +143,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `throughput_summary.csv` (per-fuzzer tx/s and gas/s distribution summary)
   - `progress_metrics_samples.csv` (raw fuzzer-native progress metrics such as seq/s, coverage proxy, corpus size, favored items, failure rate when available)
   - `progress_metrics_summary.csv` (per-fuzzer distribution summary of those progress metrics)
-  - `differential_coverage_summary.csv` (human-readable baseline/feature verdicts computed from per-sample relscore statistics and relcov confidence intervals)
+  - `differential_coverage_summary.csv` (human-readable baseline/feature verdicts computed from per-sample relscore statistics and relcov non-inferiority against baseline reliability)
   - `differential_coverage_statistics.json` (machine-readable verdict inputs, per-campaign test results, intervals, sample counts, and aggregate verdict)
   - `differential_coverage_relscores.csv` (relscore values computed from normalized AFL showmap campaigns)
   - `differential_coverage_relcov.csv` (pairwise non-self relcov values computed from normalized AFL showmap campaigns)
@@ -159,10 +159,11 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `showmap_campaigns/combined/<approach>/<trial>.txt` unions all showmap files for each trial.
   - `showmap_campaigns/by_test/<suite-test>/<approach>/<trial>.txt` preserves per-test drill-down campaigns.
 - Relscore and relcov are computed through the `differential-coverage` package from normalized AFL showmap campaign directories. Only positive AFL showmap counts are treated as covered edges.
+- Relcov gating compares the feature's per-trial retention of `upper(baseline)` against the baseline reliability diagonal, not against an absolute coverage floor. The default non-inferiority margin is 0.05 relcov.
 - When a campaign has one baseline approach (`master`, `main`, `stable`, or a `*-master`/`*-main` label) and one feature approach, `differential_coverage_summary.csv` records separate `relscore` and `relcov` metric rows with the same reported verdict:
-  - `improvement`: relscore is significantly higher after target-family Holm correction, the effect size is meaningful, and the lower bound of the relcov bootstrap interval holds the configured floor.
-  - `needs-review`: relscore is significantly higher but relcov is uncertain or shows a coverage shift.
-  - `regression`: relscore is significantly lower, or the upper bound of the relcov bootstrap interval is below the configured floor.
+  - `improvement`: relscore is significantly higher after target-family Holm correction, the effect size is meaningful, and relcov non-inferiority is held against the baseline reliability diagonal.
+  - `needs-review`: relscore is significantly higher but relcov non-inferiority is inconclusive.
+  - `regression`: relscore is significantly lower, or relcov non-inferiority fails.
   - `inconclusive`: the result is not significant after correction, has too few samples, is missing required seed pairs, or has insufficient samples for the confidence intervals.
 - Low-run campaigns still report point relscore, relcov, pairing rate, and sample counts, but the verdict is `inconclusive` with a `verdict_reason` such as `too few runs`.
 - Differential coverage has an explicit pairing mode. `unpaired` treats repeated
@@ -207,6 +208,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `time_to_k.png`
   - `final_distribution.png`
   - `plateau_and_late_share.png`
+  - `differential_coverage_statistics.png`, when differential coverage statistics are available
 
 If input CSV is empty, the report explicitly records the no-data condition and emits placeholder plots.
 

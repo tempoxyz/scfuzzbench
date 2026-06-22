@@ -58,6 +58,12 @@ def main() -> int:
         default=analyze.DEFAULT_MIN_VERDICT_SAMPLES,
         help="Minimum per-arm samples required before a statistical verdict can be conclusive.",
     )
+    parser.add_argument(
+        "--noninferiority-delta",
+        type=float,
+        default=analyze.DEFAULT_RELCOV_NONINFERIORITY_DELTA,
+        help="Allowed absolute relcov loss versus baseline reliability before coverage is a regression.",
+    )
     args = parser.parse_args()
 
     timings: Dict[str, float] = {}
@@ -123,6 +129,7 @@ def main() -> int:
             pairing_mode=args.pairing_mode,
             confidence_level=args.confidence_level,
             min_samples=args.min_samples,
+            noninferiority_delta=args.noninferiority_delta,
         )
     with (args.out_dir / "analysis_timing.json").open("w", encoding="utf-8") as handle:
         json.dump(

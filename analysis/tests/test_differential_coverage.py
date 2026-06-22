@@ -102,6 +102,34 @@ class DifferentialCoverageTests(unittest.TestCase):
         return {"master": master, "pr-1": feature}
 
     @staticmethod
+    def _region(prefix, idx, count=10):
+        return {f"{prefix}{idx}-{edge}" for edge in range(count)}
+
+    @staticmethod
+    def _non_saturating_paired_campaign(
+        feature_transform,
+        region_count=3,
+        repeats=2,
+    ):
+        master = {}
+        feature = {}
+        rounds = region_count * repeats
+        for idx in range(1, rounds + 1):
+            region_idx = (idx - 1) % region_count
+            baseline_edges = DifferentialCoverageTests._region("c", region_idx)
+            sample_id = f"seed-{idx}"
+            master[sample_id] = set(baseline_edges)
+            feature[sample_id] = set(feature_transform(idx, region_idx, baseline_edges))
+        return {"master": master, "pr-1": feature}
+
+    @staticmethod
+    def _unpaired_campaign(baseline_trials, feature_trials):
+        return {
+            "master": {f"m{i}": set(edges) for i, edges in enumerate(baseline_trials, 1)},
+            "pr-1": {f"p{i}": set(edges) for i, edges in enumerate(feature_trials, 1)},
+        }
+
+    @staticmethod
     def _summary_for(campaign_name, campaign):
         return analyze.build_differential_coverage_summary_rows(
             campaign_name,
@@ -197,10 +225,12 @@ class DifferentialCoverageTests(unittest.TestCase):
                 "inconclusive",
             )
             self.assertEqual(summary[("combined", "foundry-feature")]["verdict_reason"], "too few runs")
-            self.assertEqual(
-                summary[("combined", "foundry-feature")]["feature_covers_baseline"],
-                "0.500000",
-            )
+            self.assertNotIn("feature_covers_baseline", summary[("combined", "foundry-feature")])
+            self.assertNotIn("relscore_ratio", summary[("combined", "foundry-feature")])
+            self.assertIn("baseline_reliability", summary[("combined", "foundry-feature")])
+            self.assertIn("feature_performance", summary[("combined", "foundry-feature")])
+            self.assertIn("noninferiority_delta", summary[("combined", "foundry-feature")])
+            self.assertIn("relcov_status", summary[("combined", "foundry-feature")])
 
             manifest = json.loads(
                 (out_dir / "showmap_campaign_manifest.json").read_text(encoding="utf-8")
@@ -469,8 +499,10 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(combined["feature"], "pr-15206")
             self.assertEqual(combined["verdict"], "inconclusive")
             self.assertEqual(combined["verdict_reason"], "too few runs")
-            self.assertEqual(combined["feature_covers_baseline"], "0.750000")
-            self.assertEqual(combined["baseline_covers_feature"], "0.750000")
+            self.assertEqual(combined["feature_performance"], "0.750000")
+            self.assertNotIn("feature_covers_baseline", combined)
+            self.assertNotIn("baseline_covers_feature", combined)
+            self.assertNotIn("relscore_ratio", combined)
 
     def test_target_labels_create_target_campaign_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,24 +641,6 @@ class DifferentialCoverageTests(unittest.TestCase):
             )
             self.assertIn("unpaired fallback disabled", target_state["reason"])
 
-    def test_differential_coverage_verdict_thresholds(self):
-        self.assertEqual(
-            analyze.differential_coverage_verdict(0.99, 10.0, 10.0),
-            "improvement",
-        )
-        self.assertEqual(
-            analyze.differential_coverage_verdict(0.96, 11.0, 10.0),
-            "needs-review",
-        )
-        self.assertEqual(
-            analyze.differential_coverage_verdict(0.94, 20.0, 10.0),
-            "regression",
-        )
-        self.assertEqual(
-            analyze.differential_coverage_verdict(0.99, 9.7, 10.0),
-            "regression",
-        )
-
     def test_differential_coverage_verdict_state_has_no_scheduler_contract(self):
         campaign = {
             "master": {f"s{i}": {"a", "b", "c", "d"} for i in range(3)},
@@ -697,8 +711,102 @@ class DifferentialCoverageTests(unittest.TestCase):
         )
         self.assertTrue(paired_rows[0]["paired"])
         self.assertEqual(paired_rows[0]["test_name"], "wilcoxon-signed-rank")
+        self.assertEqual(paired_rows[1]["test_name"], "wilcoxon-noninferiority")
         self.assertFalse(unpaired_rows[0]["paired"])
         self.assertEqual(unpaired_rows[0]["test_name"], "mann-whitney-u")
+        self.assertEqual(unpaired_rows[1]["test_name"], "mann-whitney-u-noninferiority")
+
+    def test_relcov_diagonal_and_cross_are_sourced_from_library_metrics(self):
+        campaign = {
+            "master": {
+                "seed-1": {"a", "b"},
+                "seed-2": {"b", "c"},
+            },
+            "pr-1": {
+                "seed-1": {"a"},
+                "seed-2": {"d"},
+            },
+        }
+        relcovs = analyze.calculate_relcovs(campaign)
+        self.assertAlmostEqual(relcovs["master"]["master"], 2 / 3)
+        self.assertAlmostEqual(relcovs["pr-1"]["master"], 1 / 6)
+
+        rows, _ = analyze.build_differential_coverage_verdict_rows(
+            self._summary_for("by_target/library", campaign),
+            {"by_target/library": campaign},
+            pairing_mode="paired",
+            min_samples=2,
+        )
+        row = next(item for item in rows if item["metric"] == "relcov")
+        self.assertAlmostEqual(row["baseline_reliability"], 2 / 3)
+        self.assertAlmostEqual(row["feature_performance"], 1 / 6)
+
+    def test_non_saturating_a_a_relcov_held_but_verdict_inconclusive(self):
+        campaign = self._non_saturating_paired_campaign(
+            lambda _idx, _region_idx, baseline_edges: baseline_edges
+        )
+        row, _ = self._relscore_row("by_target/aa", campaign, pairing_mode="paired")
+        self.assertLess(row["baseline_reliability"], 0.95)
+        self.assertEqual(row["relcov_status"], "held")
+        self.assertEqual(row["verdict"], "inconclusive")
+
+    def test_non_saturating_relscore_up_and_retention_matches_diagonal_is_improvement(self):
+        campaign = self._non_saturating_paired_campaign(
+            lambda idx, _region_idx, baseline_edges: baseline_edges
+            | {f"feature-{idx}-{extra}" for extra in range(4)}
+        )
+        row, directive = self._relscore_row("by_target/non-saturating", campaign, pairing_mode="paired")
+        self.assertLess(row["baseline_reliability"], 0.95)
+        self.assertEqual(row["relcov_status"], "held")
+        self.assertEqual(row["verdict"], "improvement")
+        self.assertEqual(directive["aggregate"]["verdict"], "improvement")
+
+    def test_non_saturating_real_retention_regression_is_flagged(self):
+        campaign = self._non_saturating_paired_campaign(
+            lambda idx, region_idx, _baseline_edges: {
+                f"c{region_idx}-{edge}" for edge in range(5)
+            }
+            | {f"feature-{idx}-{extra}" for extra in range(8)}
+        )
+        row, _ = self._relscore_row("by_target/retention-loss", campaign, pairing_mode="paired")
+        self.assertEqual(row["relcov_status"], "failed")
+        self.assertEqual(row["verdict"], "regression")
+        self.assertLess(row["relcov_delta_ci_high"], -row["noninferiority_delta"])
+        self.assertGreater(row["feature_sample_mean"], row["baseline_sample_mean"])
+
+    def test_coverage_shift_is_not_masked_by_diagonal_scaling(self):
+        campaign = self._non_saturating_paired_campaign(
+            lambda _idx, region_idx, _baseline_edges: self._region("shift", region_idx)
+        )
+        row, _ = self._relscore_row("by_target/shift", campaign, pairing_mode="paired")
+        self.assertEqual(row["relcov_status"], "failed")
+        self.assertEqual(row["verdict"], "regression")
+
+    def test_saturating_target_behaves_like_absolute_floor(self):
+        shared = {f"shared-{idx}" for idx in range(100)}
+        master = {f"seed-{idx}": set(shared) for idx in range(1, 7)}
+        feature = {
+            f"seed-{idx}": {f"shared-{edge}" for edge in range(90)}
+            | {f"feature-{idx}-{extra}" for extra in range(8)}
+            for idx in range(1, 7)
+        }
+        campaign = {"master": master, "pr-1": feature}
+        row, _ = self._relscore_row("by_target/saturating", campaign, pairing_mode="paired")
+        self.assertAlmostEqual(row["baseline_reliability"], 1.0)
+        self.assertEqual(row["relcov_status"], "failed")
+        self.assertEqual(row["verdict"], "regression")
+
+    def test_unpaired_relcov_noninferiority_can_hold(self):
+        regions = [self._region("c", idx) for idx in range(3)]
+        baseline_trials = [regions[idx % 3] for idx in range(6)]
+        feature_trials = [
+            regions[idx % 3] | {f"feature-{idx}-{extra}" for extra in range(4)}
+            for idx in range(6)
+        ]
+        campaign = self._unpaired_campaign(baseline_trials, feature_trials)
+        row, _ = self._relscore_row("by_target/unpaired-held", campaign)
+        self.assertEqual(row["relcov_status"], "held")
+        self.assertEqual(row["verdict"], "improvement")
 
     def test_statistical_verdict_significant_paired_improvement(self):
         campaign = self._seeded_campaign([3, 3, 3, 3, 3, 3])
@@ -717,7 +825,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         self.assertEqual(row["n_samples"], 6)
         self.assertLessEqual(row["p_value_adjusted"], 0.05)
         self.assertGreaterEqual(row["effect_size_a12"], analyze.A12_MEANINGFUL_HIGH)
-        self.assertGreaterEqual(row["covers_baseline_ci_low"], 0.95)
+        self.assertEqual(row["relcov_status"], "held")
         self.assertEqual(directive["aggregate"]["verdict"], "improvement")
 
     def test_statistical_verdict_noisy_equal_means_inconclusive(self):
@@ -733,8 +841,8 @@ class DifferentialCoverageTests(unittest.TestCase):
         self.assertEqual(row["reason"], "too few runs")
         self.assertEqual(row["n_samples"], 1)
         self.assertTrue(row["too_few_samples"])
-        self.assertGreater(row["relscore_ratio"], 0.0)
-        self.assertGreater(row["covers_baseline"], 0.0)
+        self.assertGreater(row["feature_relscore"], 0.0)
+        self.assertGreater(row["feature_performance"], 0.0)
 
     def test_statistical_verdict_relscores_up_but_relcov_failed(self):
         campaign = self._seeded_campaign(
@@ -744,7 +852,7 @@ class DifferentialCoverageTests(unittest.TestCase):
         )
         row, _ = self._relscore_row("by_target/shift", campaign, pairing_mode="paired")
         self.assertEqual(row["verdict"], "regression")
-        self.assertLess(row["covers_baseline_ci_high"], 0.95)
+        self.assertEqual(row["relcov_status"], "failed")
         self.assertGreater(row["feature_sample_mean"], row["baseline_sample_mean"])
 
     def test_target_regression_blocks_aggregate_improvement(self):
@@ -771,11 +879,16 @@ class DifferentialCoverageTests(unittest.TestCase):
         self.assertEqual(verdicts["by_target/bad"], "regression")
         self.assertEqual(directive["aggregate"]["verdict"], "regression")
 
-    def test_per_seed_ci_is_non_degenerate_when_samples_vary(self):
-        campaign = self._seeded_campaign([2, 3, 4, 5, 6, 7])
+    def test_relcov_delta_ci_is_non_degenerate_when_samples_vary(self):
+        campaign = self._non_saturating_paired_campaign(
+            lambda idx, region_idx, _baseline_edges: {
+                f"c{region_idx}-{edge}" for edge in range(5 + (idx % 4))
+            }
+            | {f"feature-{idx}-{extra}" for extra in range(8)}
+        )
         row, _ = self._relscore_row("by_target/varying", campaign, pairing_mode="paired")
-        self.assertEqual(row["relscore_ratio_ci_status"], "ok")
-        self.assertNotEqual(row["relscore_ratio_ci_low"], row["relscore_ratio_ci_high"])
+        self.assertEqual(row["relcov_delta_ci_status"], "ok")
+        self.assertNotEqual(row["relcov_delta_ci_low"], row["relcov_delta_ci_high"])
 
     def test_combined_is_not_a_suite_name_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:

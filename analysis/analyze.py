@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from differential_coverage import ApproachData, DifferentialCoverage
 from scipy import stats
 
 
@@ -59,8 +60,7 @@ TEXT_GAS_COUNT_PATTERNS = [
 DEFAULT_SHOWMAP_MAX_WORK_ITEMS = 50_000_000
 DEFAULT_MIN_VERDICT_SAMPLES = 6
 DEFAULT_AUTOTUNE_VALIDATION = "leave-one-target-out"
-DEFAULT_AUTOTUNE_RELCOV_FLOOR = 0.98
-DEFAULT_AUTOTUNE_TARGET_RELCOV_FLOOR = 0.95
+DEFAULT_RELCOV_NONINFERIORITY_DELTA = 0.05
 A12_MEANINGFUL_HIGH = 0.56
 A12_MEANINGFUL_LOW = 0.44
 
@@ -1791,77 +1791,22 @@ def showmap_campaign_work_items(campaign: Dict[str, Dict[str, Set[str]]]) -> int
 def calculate_relscores(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, float]:
-    # Score how distinctive each approach's coverage is. An edge is worth more when
-    # fewer approaches reach it at all, weighted by how consistently this approach hits it:
-    #   relscore[a] = sum_e (# approaches whose union omits e) * (# a's trials hitting e)
-    #                 / (# a's non-empty trials)
-    # Computed in a single pass over each approach's trials. Edges a never hits contribute
-    # 0, so we only sum the ones it did hit.
-    approach_count = len(campaign)
-
-    non_empty_trials: Dict[str, int] = {}
-    union_by_approach: Dict[str, Set[str]] = {}
-    hits_by_approach: Dict[str, "Counter[str]"] = {}
-    for approach, trials in campaign.items():
-        union: Set[str] = set()
-        hits: "Counter[str]" = Counter()
-        denom = 0
-        for edges in trials.values():
-            if not edges:
-                continue
-            denom += 1
-            union.update(edges)
-            hits.update(edges)
-        non_empty_trials[approach] = denom
-        union_by_approach[approach] = union
-        hits_by_approach[approach] = hits
-
-    # For each edge, how many approaches' unions contain it.
-    approaches_hitting_edge: "Counter[str]" = Counter()
-    for union in union_by_approach.values():
-        approaches_hitting_edge.update(union)
-
-    scores: Dict[str, float] = {}
-    for approach in campaign:
-        denom = non_empty_trials[approach]
-        if denom == 0:
-            scores[approach] = 0.0
-            continue
-        numerator = sum(
-            (approach_count - approaches_hitting_edge[edge]) * trial_hits
-            for edge, trial_hits in hits_by_approach[approach].items()
-        )
-        scores[approach] = numerator / denom
-    return scores
+    return {
+        approach: float(score)
+        for approach, score in DifferentialCoverage(campaign).relscores().items()
+    }
 
 
 def calculate_relcovs(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, Dict[str, float]]:
-    # For each (approach a, reference ref), how much of ref's total coverage a's trials
-    # typically reproduce:
-    #   relcov(a, ref) = median over a's trials of |trial & ref.union| / |ref.union|
-    trials_by_approach: Dict[str, List[Set[str]]] = {
-        approach: list(trials.values()) for approach, trials in campaign.items()
-    }
-    union_by_approach: Dict[str, Set[str]] = {
-        approach: set().union(*trials) if trials else set()
-        for approach, trials in trials_by_approach.items()
-    }
+    dc = DifferentialCoverage(campaign)
     return {
         approach: {
-            reference: (
-                statistics.median(
-                    len(trial & union_by_approach[reference])
-                    / len(union_by_approach[reference])
-                    for trial in trials_by_approach[approach]
-                )
-                if union_by_approach[reference]
-                else 0.0
-            )
-            for reference in campaign
+            reference: float(dc.approaches[approach].relcov(dc.approaches[reference]))
+            for reference in dc.approaches
         }
-        for approach in campaign
+        for approach in dc.approaches
     }
 
 
@@ -1883,20 +1828,6 @@ def find_baseline_feature(approaches: Iterable[str]) -> Optional[Tuple[str, str]
     baseline = baselines[0]
     feature = next(approach for approach in approaches if approach != baseline)
     return baseline, feature
-
-
-def differential_coverage_verdict(
-    feature_covers_baseline: float,
-    feature_relscore: float,
-    baseline_relscore: float,
-) -> str:
-    if feature_covers_baseline < 0.95 or feature_relscore < 0.98 * baseline_relscore:
-        return "regression"
-    if feature_covers_baseline >= 0.98 and feature_relscore >= baseline_relscore:
-        return "improvement"
-    if 0.95 <= feature_covers_baseline < 0.98 and feature_relscore > baseline_relscore:
-        return "needs-review"
-    return "inconclusive"
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -2021,6 +1952,40 @@ def _wilcoxon_signed_rank(xs: Sequence[float], ys: Sequence[float]) -> Tuple[flo
     return float(result.statistic), float(result.pvalue)
 
 
+def _wilcoxon_noninferiority(
+    deltas: Sequence[float],
+    noninferiority_delta: float,
+) -> Tuple[float, float]:
+    shifted = [float(delta) + noninferiority_delta for delta in deltas]
+    shifted = [value for value in shifted if value != 0.0]
+    if not shifted:
+        return 0.0, 1.0
+    result = stats.wilcoxon(
+        shifted,
+        alternative="greater",
+        zero_method="wilcox",
+        method="auto",
+    )
+    return float(result.statistic), float(result.pvalue)
+
+
+def _mann_whitney_noninferiority(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    noninferiority_delta: float,
+) -> Tuple[float, float]:
+    if not xs or not ys:
+        return 0.0, 1.0
+    shifted_xs = [float(value) + noninferiority_delta for value in xs]
+    result = stats.mannwhitneyu(
+        shifted_xs,
+        [float(value) for value in ys],
+        alternative="greater",
+        method="auto",
+    )
+    return float(result.statistic), float(result.pvalue)
+
+
 def _holm_adjust(p_values: Sequence[float]) -> List[float]:
     indexed = sorted(enumerate(p_values), key=lambda item: item[1])
     adjusted = [1.0] * len(p_values)
@@ -2065,46 +2030,104 @@ def trial_scores(
 
 
 def _relcov_samples(
-    campaign: Dict[str, Dict[str, Set[str]]],
+    dc: DifferentialCoverage[str, str, str],
     approach: str,
     reference: str,
     sample_ids: Optional[Sequence[str]] = None,
 ) -> List[float]:
-    reference_union = set().union(*campaign.get(reference, {}).values())
-    if not reference_union:
+    if approach not in dc.approaches or reference not in dc.approaches:
         return []
-    trials = campaign.get(approach, {})
+    reference_data = dc.approaches[reference]
+    if not reference_data.edges_union:
+        return []
+    trials = dc.approaches[approach].edges_by_trial
     ids = list(sample_ids) if sample_ids is not None else list(trials.keys())
-    return [
-        len(trials[trial_id] & reference_union) / len(reference_union)
-        for trial_id in ids
-        if trial_id in trials
-    ]
+
+    samples: List[float] = []
+    for trial_id in ids:
+        if trial_id not in trials:
+            continue
+        edges = set(trials[trial_id])
+        if not edges:
+            samples.append(0.0)
+            continue
+        samples.append(float(ApproachData({trial_id: edges}).relcov(reference_data)))
+    return samples
 
 
-def _ratio_samples(
-    feature_scores_by_sample: Dict[str, float],
-    baseline_scores_by_sample: Dict[str, float],
-    sample_ids: Sequence[str],
-) -> Tuple[List[float], str]:
-    ratios = [
-        feature_scores_by_sample[sample_id] / baseline_scores_by_sample[sample_id]
-        for sample_id in sample_ids
-        if sample_id in feature_scores_by_sample
-        and sample_id in baseline_scores_by_sample
-        and baseline_scores_by_sample[sample_id] > 0.0
-    ]
-    if ratios:
-        return ratios, "ok"
-    return [], "undefined (zero baseline relscore)"
+def _paired_deltas(xs: Sequence[float], ys: Sequence[float]) -> List[float]:
+    return [float(x) - float(y) for x, y in zip(xs, ys)]
 
 
-def _statistical_verdict(row: Dict[str, Any], confidence_level: float, relcov_floor: float) -> str:
+def _bca_unpaired_mean_diff_ci(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    confidence_level: float,
+    min_samples: int,
+    iterations: int = 2000,
+) -> Tuple[Optional[float], Optional[float], str]:
+    finite_xs = [float(value) for value in xs if math.isfinite(float(value))]
+    finite_ys = [float(value) for value in ys if math.isfinite(float(value))]
+    if len(finite_xs) < min_samples or len(finite_ys) < min_samples:
+        return None, None, "insufficient n"
+    theta_hat = _mean(finite_xs) - _mean(finite_ys)
+    if len(set(finite_xs)) == 1 and len(set(finite_ys)) == 1:
+        return theta_hat, theta_hat, "ok"
+
+    rng = random.Random(8675309)
+    nx = len(finite_xs)
+    ny = len(finite_ys)
+    boot = sorted(
+        _mean([finite_xs[rng.randrange(nx)] for _ in range(nx)])
+        - _mean([finite_ys[rng.randrange(ny)] for _ in range(ny)])
+        for _ in range(iterations)
+    )
+
+    less = sum(1 for value in boot if value < theta_hat)
+    equal = sum(1 for value in boot if value == theta_hat)
+    prop_less = min(max((less + 0.5 * equal) / iterations, 1e-9), 1.0 - 1e-9)
+    z0 = float(stats.norm.ppf(prop_less))
+
+    jack: List[float] = []
+    if nx > 1:
+        jack.extend(
+            _mean([value for idx, value in enumerate(finite_xs) if idx != leave_out])
+            - _mean(finite_ys)
+            for leave_out in range(nx)
+        )
+    if ny > 1:
+        jack.extend(
+            _mean(finite_xs)
+            - _mean([value for idx, value in enumerate(finite_ys) if idx != leave_out])
+            for leave_out in range(ny)
+        )
+    jack_mean = _mean(jack)
+    numerator = sum((jack_mean - value) ** 3 for value in jack)
+    denominator = 6.0 * (
+        sum((jack_mean - value) ** 2 for value in jack) ** 1.5
+    )
+    acceleration = numerator / denominator if denominator else 0.0
+
+    alpha = (1.0 - confidence_level) / 2.0
+
+    def adjusted_quantile(raw_alpha: float) -> float:
+        z_alpha = float(stats.norm.ppf(raw_alpha))
+        denom = 1.0 - acceleration * (z0 + z_alpha)
+        if denom == 0.0:
+            return raw_alpha
+        return float(stats.norm.cdf(z0 + (z0 + z_alpha) / denom))
+
+    return (
+        _percentile(boot, adjusted_quantile(alpha)),
+        _percentile(boot, adjusted_quantile(1.0 - alpha)),
+        "ok",
+    )
+
+
+def _statistical_verdict(row: Dict[str, Any], confidence_level: float) -> str:
     if row["too_few_samples"]:
         return "inconclusive"
     if row["pairing_mode"] == "paired" and not row["paired"]:
-        return "inconclusive"
-    if row["covers_baseline_ci_status"] != "ok":
         return "inconclusive"
 
     alpha = 1.0 - confidence_level
@@ -2112,48 +2135,47 @@ def _statistical_verdict(row: Dict[str, Any], confidence_level: float, relcov_fl
     feature_mean = float(row["feature_sample_mean"])
     baseline_mean = float(row["baseline_sample_mean"])
     a12 = float(row["effect_size_a12"])
-    relcov_low = row["covers_baseline_ci_low"]
-    relcov_high = row["covers_baseline_ci_high"]
 
     significant = p_adjusted <= alpha
     relscore_up = significant and feature_mean > baseline_mean and a12 >= A12_MEANINGFUL_HIGH
     relscore_down = significant and feature_mean < baseline_mean and a12 <= A12_MEANINGFUL_LOW
-    relcov_failed = relcov_high is not None and relcov_high < relcov_floor
-    relcov_held = relcov_low is not None and relcov_low >= relcov_floor
+    relcov_status = row.get("relcov_status", "inconclusive")
 
-    if relscore_down or relcov_failed:
+    if relscore_down or relcov_status == "failed":
         return "regression"
-    if relscore_up and relcov_held:
+    if relscore_up and relcov_status == "held":
         return "improvement"
-    if relscore_up and not relcov_held:
+    if relscore_up:
         return "needs-review"
     return "inconclusive"
 
 
-def _verdict_reason(row: Dict[str, Any], relcov_floor: float) -> str:
+def _verdict_reason(row: Dict[str, Any]) -> str:
     if row["pairing_mode"] == "paired" and not row["paired"]:
         return "paired mode requires matched seed labels; unpaired fallback disabled"
     if row["too_few_samples"]:
         return "too few runs"
-    if row["covers_baseline_ci_status"] != "ok":
-        return row["covers_baseline_ci_status"]
+    relcov_status = row.get("relcov_status", "inconclusive")
+    relcov_ci_status = row.get("relcov_delta_ci_status", "ok")
     verdict = row["verdict"]
     if verdict == "improvement":
-        return "significant relscore improvement and relcov floor held"
+        return "significant relscore improvement and relcov non-inferiority held"
     if verdict == "regression":
-        if row["covers_baseline_ci_high"] is not None and row["covers_baseline_ci_high"] < relcov_floor:
-            return "relcov confidence interval below floor"
+        if relcov_status == "failed":
+            return "relcov non-inferiority failed"
         return "significant relscore regression"
     if verdict == "needs-review":
-        return "significant relscore improvement with relcov uncertainty or coverage shift"
+        if relcov_ci_status != "ok":
+            return f"significant relscore improvement with relcov {relcov_ci_status}"
+        return "significant relscore improvement with relcov non-inferiority inconclusive"
     return "not significant after correction"
 
 
 def build_differential_coverage_verdict_rows(
-    summary_rows: List[Tuple[str, str, str, str, float, float, float, float, float]],
+    summary_rows: List[Tuple[str, str, str, float, float]],
     campaigns: Dict[str, Dict[str, Dict[str, Set[str]]]],
     confidence_level: float = 0.95,
-    relcov_floor: float = 0.95,
+    noninferiority_delta: float = DEFAULT_RELCOV_NONINFERIORITY_DELTA,
     pairing_mode: str = "unpaired",
     min_samples: int = DEFAULT_MIN_VERDICT_SAMPLES,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -2164,16 +2186,15 @@ def build_differential_coverage_verdict_rows(
         campaign_name,
         baseline,
         feature,
-        legacy_verdict,
-        feature_covers_baseline,
-        _baseline_covers_feature,
         baseline_relscore,
         feature_relscore,
-        relscore_ratio,
     ) in summary_rows:
         campaign = campaigns.get(campaign_name, {})
         if not campaign or baseline not in campaign or feature not in campaign:
             continue
+        dc = DifferentialCoverage(campaign)
+        feature_performance = float(dc.approaches[feature].relcov(dc.approaches[baseline]))
+        baseline_reliability = float(dc.approaches[baseline].relcov(dc.approaches[baseline]))
         relscores_by_sample = per_sample_relscores(campaign)
         baseline_scores_by_sample = relscores_by_sample.get(baseline, {})
         feature_scores_by_sample = relscores_by_sample.get(feature, {})
@@ -2211,26 +2232,49 @@ def build_differential_coverage_verdict_rows(
             if seed_pairing_expected
             else _mann_whitney_u(feature_scores, baseline_scores)
         )
-        feature_relcovs = _relcov_samples(
-            campaign,
+        feature_retention_samples = _relcov_samples(
+            dc,
             feature,
             baseline,
             sample_ids if paired else None,
         )
+        baseline_reliability_samples = _relcov_samples(
+            dc,
+            baseline,
+            baseline,
+            sample_ids if paired else None,
+        )
         if paired:
-            ratio_samples, ratio_status = _ratio_samples(
-                feature_scores_by_sample,
-                baseline_scores_by_sample,
-                sample_ids,
+            relcov_deltas = _paired_deltas(
+                feature_retention_samples,
+                baseline_reliability_samples,
             )
+            relcov_statistic, relcov_p_value = _wilcoxon_noninferiority(
+                relcov_deltas,
+                noninferiority_delta,
+            )
+            relcov_delta_ci = _bca_mean_ci(
+                relcov_deltas,
+                confidence_level,
+                min_samples,
+            )
+        elif seed_pairing_expected:
+            relcov_deltas = []
+            relcov_statistic, relcov_p_value = 0.0, 1.0
+            relcov_delta_ci = (None, None, "insufficient n")
         else:
-            baseline_mean = _mean(baseline_scores)
-            if baseline_mean > 0.0:
-                ratio_samples = [score / baseline_mean for score in feature_scores]
-                ratio_status = "ok"
-            else:
-                ratio_samples = []
-                ratio_status = "undefined (zero baseline relscore)"
+            relcov_deltas = []
+            relcov_statistic, relcov_p_value = _mann_whitney_noninferiority(
+                feature_retention_samples,
+                baseline_reliability_samples,
+                noninferiority_delta,
+            )
+            relcov_delta_ci = _bca_unpaired_mean_diff_ci(
+                feature_retention_samples,
+                baseline_reliability_samples,
+                confidence_level,
+                min_samples,
+            )
         n_samples = (
             len(shared_ids)
             if paired
@@ -2241,8 +2285,16 @@ def build_differential_coverage_verdict_rows(
         seed_ids = baseline_seed_ids | feature_seed_ids
         n_seeds = len(shared_ids) if paired else len(seed_ids)
         too_few_samples = n_samples < min_samples
-        ratio_ci = _bca_mean_ci(ratio_samples, confidence_level, min_samples)
-        relcov_ci = _bca_mean_ci(feature_relcovs, confidence_level, min_samples)
+        if (
+            seed_pairing_expected and not paired
+        ) or too_few_samples or relcov_delta_ci[2] != "ok":
+            relcov_status = "inconclusive"
+        elif relcov_delta_ci[1] is not None and relcov_delta_ci[1] < -noninferiority_delta:
+            relcov_status = "failed"
+        elif relcov_delta_ci[0] is not None and relcov_delta_ci[0] >= -noninferiority_delta:
+            relcov_status = "held"
+        else:
+            relcov_status = "inconclusive"
         if seed_pairing_expected and not paired:
             reason = "paired mode requires matched seed labels; unpaired fallback disabled"
         elif seed_pairing_expected and pairing_rate < 0.8:
@@ -2262,7 +2314,8 @@ def build_differential_coverage_verdict_rows(
             "campaign": campaign_name,
             "baseline": baseline,
             "feature": feature,
-            "legacy_verdict": legacy_verdict,
+            "baseline_relscore": baseline_relscore,
+            "feature_relscore": feature_relscore,
             "pairing_mode": pairing_mode,
             "n_trials": n_samples,
             "n_samples": n_samples,
@@ -2276,14 +2329,13 @@ def build_differential_coverage_verdict_rows(
             "effect_size_a12": _a12(feature_scores, baseline_scores),
             "baseline_sample_mean": _mean(baseline_scores),
             "feature_sample_mean": _mean(feature_scores),
-            "relscore_ratio": relscore_ratio,
-            "relscore_ratio_ci_low": ratio_ci[0],
-            "relscore_ratio_ci_high": ratio_ci[1],
-            "relscore_ratio_ci_status": ratio_ci[2] if ratio_status == "ok" else ratio_status,
-            "covers_baseline": feature_covers_baseline,
-            "covers_baseline_ci_low": relcov_ci[0],
-            "covers_baseline_ci_high": relcov_ci[1],
-            "covers_baseline_ci_status": relcov_ci[2],
+            "baseline_reliability": baseline_reliability,
+            "feature_performance": feature_performance,
+            "noninferiority_delta": noninferiority_delta,
+            "relcov_delta_ci_low": relcov_delta_ci[0],
+            "relcov_delta_ci_high": relcov_delta_ci[1],
+            "relcov_delta_ci_status": relcov_delta_ci[2],
+            "relcov_status": relcov_status,
             "missing_count": 0,
             "reason": reason,
         }
@@ -2292,10 +2344,21 @@ def build_differential_coverage_verdict_rows(
             {
                 **base_row,
                 "metric": "relcov",
-                "test_name": "bootstrap-bca",
-                "statistic": feature_covers_baseline,
-                "p_value": 1.0,
-                "effect_size_a12": 0.5,
+                "test_name": (
+                    "wilcoxon-noninferiority"
+                    if paired
+                    else "paired-required"
+                    if seed_pairing_expected
+                    else "mann-whitney-u-noninferiority"
+                ),
+                "statistic": relcov_statistic,
+                "p_value": relcov_p_value,
+                "effect_size_a12": _a12(
+                    feature_retention_samples,
+                    baseline_reliability_samples,
+                ),
+                "baseline_sample_mean": _mean(baseline_reliability_samples),
+                "feature_sample_mean": _mean(feature_retention_samples),
             }
         )
     for row in rows:
@@ -2309,6 +2372,17 @@ def build_differential_coverage_verdict_rows(
     target_adjusted = _holm_adjust([float(rows[idx]["p_value"]) for idx in target_indices])
     for idx, p_adjusted in zip(target_indices, target_adjusted):
         rows[idx]["p_value_adjusted"] = p_adjusted
+    target_relcov_indices = [
+        idx
+        for idx, row in enumerate(rows)
+        if row["metric"] == "relcov"
+        and _is_target_family_campaign(str(row["campaign"]))
+    ]
+    target_relcov_adjusted = _holm_adjust(
+        [float(rows[idx]["p_value"]) for idx in target_relcov_indices]
+    )
+    for idx, p_adjusted in zip(target_relcov_indices, target_relcov_adjusted):
+        rows[idx]["p_value_adjusted"] = p_adjusted
 
     verdict_by_campaign: Dict[Tuple[str, str], str] = {}
     reason_by_campaign: Dict[Tuple[str, str], str] = {}
@@ -2316,9 +2390,9 @@ def build_differential_coverage_verdict_rows(
         if row["metric"] != "relscore":
             continue
         key = (str(row["campaign"]), str(row["feature"]))
-        verdict = _statistical_verdict(row, confidence_level, relcov_floor)
+        verdict = _statistical_verdict(row, confidence_level)
         row["verdict"] = verdict
-        row["reason"] = _verdict_reason(row, relcov_floor)
+        row["reason"] = _verdict_reason(row)
         verdict_by_campaign[key] = verdict
         reason_by_campaign[key] = row["reason"]
     for row in rows:
@@ -2333,10 +2407,8 @@ def build_differential_coverage_verdict_rows(
     ]
     target_count = len(target_verdict_rows)
     improvement_count = sum(1 for row in target_verdict_rows if row["verdict"] == "improvement")
-    relcov_floor_held_for_all_targets = target_count > 0 and all(
-        row["covers_baseline_ci_status"] == "ok"
-        and row["covers_baseline_ci_low"] is not None
-        and row["covers_baseline_ci_low"] >= relcov_floor
+    relcov_held_for_all_targets = target_count > 0 and all(
+        row["relcov_status"] == "held"
         for row in target_verdict_rows
     )
     aggregate_verdict = "inconclusive"
@@ -2347,7 +2419,7 @@ def build_differential_coverage_verdict_rows(
     elif (
         target_count > 0
         and improvement_count > target_count / 2
-        and relcov_floor_held_for_all_targets
+        and relcov_held_for_all_targets
     ):
         aggregate_verdict = "improvement"
     campaign_rows = [row for row in rows if row["metric"] == "relscore"]
@@ -2355,7 +2427,7 @@ def build_differential_coverage_verdict_rows(
     verdict_state = {
         "version": 1,
         "confidence_level": confidence_level,
-        "relcov_floor": relcov_floor,
+        "relcov_noninferiority_delta": noninferiority_delta,
         "min_samples": min_samples,
         "aggregate": {
             "winner": "",
@@ -2371,7 +2443,7 @@ def build_differential_coverage_summary_rows(
     campaign_name: str,
     relscores: Dict[str, float],
     relcovs: Dict[str, Dict[str, float]],
-) -> List[Tuple[str, str, str, str, float, float, float, float, float]]:
+) -> List[Tuple[str, str, str, float, float]]:
     pair = find_baseline_feature(relcovs.keys())
     if pair is None:
         return []
@@ -2379,28 +2451,15 @@ def build_differential_coverage_summary_rows(
     if baseline not in relscores or feature not in relscores:
         return []
 
-    feature_covers_baseline = relcovs.get(feature, {}).get(baseline)
-    baseline_covers_feature = relcovs.get(baseline, {}).get(feature)
-    if feature_covers_baseline is None or baseline_covers_feature is None:
-        return []
-
     baseline_relscore = relscores[baseline]
     feature_relscore = relscores[feature]
-    verdict = differential_coverage_verdict(
-        feature_covers_baseline, feature_relscore, baseline_relscore
-    )
-    relscore_ratio = feature_relscore / baseline_relscore if baseline_relscore else 0.0
     return [
         (
             campaign_name,
             baseline,
             feature,
-            verdict,
-            feature_covers_baseline,
-            baseline_covers_feature,
             baseline_relscore,
             feature_relscore,
-            relscore_ratio,
         )
     ]
 
@@ -2445,6 +2504,7 @@ def write_differential_coverage_outputs(
     pairing_mode: str = "unpaired",
     confidence_level: float = 0.95,
     min_samples: int = DEFAULT_MIN_VERDICT_SAMPLES,
+    noninferiority_delta: float = DEFAULT_RELCOV_NONINFERIORITY_DELTA,
 ) -> None:
     trials, skipped = load_showmap_trials(logs_dir, excluded_fuzzers)
     campaigns = build_showmap_campaigns(trials)
@@ -2454,7 +2514,7 @@ def write_differential_coverage_outputs(
 
     relscore_rows: List[Tuple[str, str, float, int, int]] = []
     relcov_rows: List[Tuple[str, str, str, float]] = []
-    summary_rows: List[Tuple[str, str, str, str, float, float, float, float, float]] = []
+    summary_rows: List[Tuple[str, str, str, float, float]] = []
     manifest: Dict[str, Any] = {
         "raw_trials": len(trials),
         "skipped": skipped,
@@ -2531,6 +2591,7 @@ def write_differential_coverage_outputs(
         confidence_level=confidence_level,
         pairing_mode=pairing_mode,
         min_samples=min_samples,
+        noninferiority_delta=noninferiority_delta,
     )
     verdict_by_key = {
         (row["campaign"], row["feature"], row["metric"]): row for row in verdict_rows
@@ -2545,12 +2606,8 @@ def write_differential_coverage_outputs(
                 "feature",
                 "verdict",
                 "verdict_reason",
-                "legacy_verdict",
-                "feature_covers_baseline",
-                "baseline_covers_feature",
                 "baseline_relscore",
                 "feature_relscore",
-                "relscore_ratio",
                 "pairing_mode",
                 "n_trials",
                 "n_samples",
@@ -2565,12 +2622,13 @@ def write_differential_coverage_outputs(
                 "effect_size_a12",
                 "baseline_sample_mean",
                 "feature_sample_mean",
-                "relscore_ratio_ci_low",
-                "relscore_ratio_ci_high",
-                "relscore_ratio_ci_status",
-                "covers_baseline_ci_low",
-                "covers_baseline_ci_high",
-                "covers_baseline_ci_status",
+                "baseline_reliability",
+                "feature_performance",
+                "noninferiority_delta",
+                "relcov_delta_ci_low",
+                "relcov_delta_ci_high",
+                "relcov_delta_ci_status",
+                "relcov_status",
                 "missing_count",
             ]
         )
@@ -2579,12 +2637,8 @@ def write_differential_coverage_outputs(
                 campaign_name,
                 baseline,
                 feature,
-                legacy_verdict,
-                feature_covers_baseline,
-                baseline_covers_feature,
                 baseline_relscore,
                 feature_relscore,
-                relscore_ratio,
             ) = source_row
             for metric in ("relscore", "relcov"):
                 verdict_row = verdict_by_key.get((campaign_name, feature, metric), {})
@@ -2596,12 +2650,8 @@ def write_differential_coverage_outputs(
                         feature,
                         verdict_row.get("verdict", "inconclusive"),
                         verdict_row.get("reason", ""),
-                        legacy_verdict,
-                        f"{feature_covers_baseline:.6f}",
-                        f"{baseline_covers_feature:.6f}",
                         f"{baseline_relscore:.6f}",
                         f"{feature_relscore:.6f}",
-                        f"{relscore_ratio:.6f}",
                         verdict_row.get("pairing_mode", pairing_mode),
                         verdict_row.get("n_trials", ""),
                         verdict_row.get("n_samples", ""),
@@ -2616,12 +2666,13 @@ def write_differential_coverage_outputs(
                         _format_csv_float(verdict_row.get("effect_size_a12", 0.5)) if verdict_row else "",
                         _format_csv_float(verdict_row.get("baseline_sample_mean", 0.0)) if verdict_row else "",
                         _format_csv_float(verdict_row.get("feature_sample_mean", 0.0)) if verdict_row else "",
-                        _format_csv_float(verdict_row.get("relscore_ratio_ci_low")) if verdict_row else "",
-                        _format_csv_float(verdict_row.get("relscore_ratio_ci_high")) if verdict_row else "",
-                        verdict_row.get("relscore_ratio_ci_status", ""),
-                        _format_csv_float(verdict_row.get("covers_baseline_ci_low")) if verdict_row else "",
-                        _format_csv_float(verdict_row.get("covers_baseline_ci_high")) if verdict_row else "",
-                        verdict_row.get("covers_baseline_ci_status", ""),
+                        _format_csv_float(verdict_row.get("baseline_reliability")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("feature_performance")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("noninferiority_delta")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("relcov_delta_ci_low")) if verdict_row else "",
+                        _format_csv_float(verdict_row.get("relcov_delta_ci_high")) if verdict_row else "",
+                        verdict_row.get("relcov_delta_ci_status", ""),
+                        verdict_row.get("relcov_status", ""),
                         verdict_row.get("missing_count", ""),
                     ]
                 )
@@ -2687,6 +2738,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_MIN_VERDICT_SAMPLES,
         help="Minimum per-arm samples required before a statistical verdict can be conclusive.",
+    )
+    run_parser.add_argument(
+        "--noninferiority-delta",
+        type=float,
+        default=DEFAULT_RELCOV_NONINFERIORITY_DELTA,
+        help="Allowed absolute relcov loss versus baseline reliability before coverage is a regression.",
     )
     return parser.parse_args()
 
@@ -2760,6 +2817,7 @@ def main() -> int:
             pairing_mode=args.pairing_mode,
             confidence_level=args.confidence_level,
             min_samples=args.min_samples,
+            noninferiority_delta=args.noninferiority_delta,
         )
         return 0
     return 1
