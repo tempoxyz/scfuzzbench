@@ -2099,6 +2099,24 @@ def _ratio_samples(
     return [], "undefined (zero baseline relscore)"
 
 
+def _effective_relcov_floor(row: Dict[str, Any], relcov_floor: float) -> float:
+    """Scale the relcov floor by how well the baseline reproduces its own coverage.
+
+    The raw relcov floor assumes a single trial reproduces ~all of the opposing
+    arm's union (coverage saturation). Non-saturating targets never satisfy that,
+    even when an arm is compared against itself, so an absolute floor produces
+    false regressions whenever a noisy target is selected. Scaling by the
+    baseline's self-relcov keeps the floor meaningful: for saturating baselines
+    (self-relcov ~1.0) it is unchanged, while for non-saturating baselines it only
+    asks that the feature reproduce baseline coverage about as well as the baseline
+    reproduces its own.
+    """
+    baseline_self = row.get("baseline_self_relcov")
+    if baseline_self is None or baseline_self <= 0.0:
+        return relcov_floor
+    return relcov_floor * min(float(baseline_self), 1.0)
+
+
 def _statistical_verdict(row: Dict[str, Any], confidence_level: float, relcov_floor: float) -> str:
     if row["too_few_samples"]:
         return "inconclusive"
@@ -2114,12 +2132,13 @@ def _statistical_verdict(row: Dict[str, Any], confidence_level: float, relcov_fl
     a12 = float(row["effect_size_a12"])
     relcov_low = row["covers_baseline_ci_low"]
     relcov_high = row["covers_baseline_ci_high"]
+    effective_floor = _effective_relcov_floor(row, relcov_floor)
 
     significant = p_adjusted <= alpha
     relscore_up = significant and feature_mean > baseline_mean and a12 >= A12_MEANINGFUL_HIGH
     relscore_down = significant and feature_mean < baseline_mean and a12 <= A12_MEANINGFUL_LOW
-    relcov_failed = relcov_high is not None and relcov_high < relcov_floor
-    relcov_held = relcov_low is not None and relcov_low >= relcov_floor
+    relcov_failed = relcov_high is not None and relcov_high < effective_floor
+    relcov_held = relcov_low is not None and relcov_low >= effective_floor
 
     if relscore_down or relcov_failed:
         return "regression"
@@ -2141,7 +2160,11 @@ def _verdict_reason(row: Dict[str, Any], relcov_floor: float) -> str:
     if verdict == "improvement":
         return "significant relscore improvement and relcov floor held"
     if verdict == "regression":
-        if row["covers_baseline_ci_high"] is not None and row["covers_baseline_ci_high"] < relcov_floor:
+        effective_floor = _effective_relcov_floor(row, relcov_floor)
+        if row["covers_baseline_ci_high"] is not None and row["covers_baseline_ci_high"] < effective_floor:
+            baseline_self = row.get("baseline_self_relcov")
+            if baseline_self is not None and float(baseline_self) < relcov_floor:
+                return "relcov below baseline-saturation-adjusted floor"
             return "relcov confidence interval below floor"
         return "significant relscore regression"
     if verdict == "needs-review":
@@ -2217,6 +2240,20 @@ def build_differential_coverage_verdict_rows(
             baseline,
             sample_ids if paired else None,
         )
+        # How well the baseline reproduces its *own* union. For saturating targets
+        # this is ~1.0; for non-saturating targets (a single trial only reaches a
+        # fraction of the multi-trial union) it is well below 1.0. Used to scale the
+        # relcov floor so non-saturating targets are not flagged as regressions just
+        # because one trial cannot reproduce the opposing arm's whole union.
+        baseline_self_relcovs = _relcov_samples(
+            campaign,
+            baseline,
+            baseline,
+            sample_ids if paired else None,
+        )
+        baseline_self_relcov = (
+            statistics.median(baseline_self_relcovs) if baseline_self_relcovs else None
+        )
         if paired:
             ratio_samples, ratio_status = _ratio_samples(
                 feature_scores_by_sample,
@@ -2284,6 +2321,7 @@ def build_differential_coverage_verdict_rows(
             "covers_baseline_ci_low": relcov_ci[0],
             "covers_baseline_ci_high": relcov_ci[1],
             "covers_baseline_ci_status": relcov_ci[2],
+            "baseline_self_relcov": baseline_self_relcov,
             "missing_count": 0,
             "reason": reason,
         }
@@ -2336,7 +2374,7 @@ def build_differential_coverage_verdict_rows(
     relcov_floor_held_for_all_targets = target_count > 0 and all(
         row["covers_baseline_ci_status"] == "ok"
         and row["covers_baseline_ci_low"] is not None
-        and row["covers_baseline_ci_low"] >= relcov_floor
+        and row["covers_baseline_ci_low"] >= _effective_relcov_floor(row, relcov_floor)
         for row in target_verdict_rows
     )
     aggregate_verdict = "inconclusive"

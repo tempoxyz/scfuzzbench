@@ -102,6 +102,17 @@ class DifferentialCoverageTests(unittest.TestCase):
         return {"master": master, "pr-1": feature}
 
     @staticmethod
+    def _third(k):
+        return {f"c{k}-{j}" for j in range(10)}
+
+    @staticmethod
+    def _unpaired_campaign(baseline_trials, feature_trials):
+        return {
+            "master": {f"m{i}": set(edges) for i, edges in enumerate(baseline_trials)},
+            "pr-1": {f"p{i}": set(edges) for i, edges in enumerate(feature_trials)},
+        }
+
+    @staticmethod
     def _summary_for(campaign_name, campaign):
         return analyze.build_differential_coverage_summary_rows(
             campaign_name,
@@ -745,6 +756,62 @@ class DifferentialCoverageTests(unittest.TestCase):
         row, _ = self._relscore_row("by_target/shift", campaign, pairing_mode="paired")
         self.assertEqual(row["verdict"], "regression")
         self.assertLess(row["covers_baseline_ci_high"], 0.95)
+        self.assertGreater(row["feature_sample_mean"], row["baseline_sample_mean"])
+
+    def test_non_saturating_relscore_up_is_not_a_false_regression(self):
+        # Reproduces the aave-v4 / superform-v2 pattern: a non-saturating target
+        # (a single 1h run reaches only a fraction of the multi-run union) where the
+        # feature relscore is actually higher. The raw 0.95 relcov floor flags this
+        # as a regression even though the feature reproduces baseline coverage as
+        # well as the baseline reproduces its own.
+        thirds = [self._third(k) for k in range(3)]
+        baseline_trials = []
+        for i in range(6):
+            edges = set(thirds[i % 3])
+            if i == 0:
+                edges |= {f"bu{j}" for j in range(5)}  # baseline-only edges, keeps relscore > 0
+            baseline_trials.append(edges)
+        feature_trials = [thirds[i % 3] | {f"f{i}-{u}" for u in range(8)} for i in range(6)]
+        campaign = self._unpaired_campaign(baseline_trials, feature_trials)
+        row, _ = self._relscore_row("by_target/noisy", campaign)
+        # Baseline does not saturate its own union (a single trial reaches ~1/3).
+        self.assertLess(row["baseline_self_relcov"], 0.95)
+        # The raw 0.95 floor would have failed here...
+        self.assertLess(row["covers_baseline_ci_high"], 0.95)
+        # ...but the saturation-adjusted floor must not flag a regression.
+        self.assertNotEqual(row["verdict"], "regression")
+        self.assertEqual(row["verdict"], "improvement")
+        self.assertGreater(row["feature_sample_mean"], row["baseline_sample_mean"])
+
+    def test_non_saturating_a_a_control_is_not_regression(self):
+        # A/A control: identical coverage distributions on a non-saturating target.
+        # Under the raw floor this would falsely report a regression; it must be
+        # inconclusive (no relscore difference, relcov reproduces baseline self).
+        thirds = [self._third(k) for k in range(3)]
+        trials = [thirds[i % 3] for i in range(6)]
+        campaign = self._unpaired_campaign(trials, [set(t) for t in trials])
+        row, _ = self._relscore_row("by_target/aa", campaign)
+        self.assertLess(row["baseline_self_relcov"], 0.95)
+        self.assertLess(row["covers_baseline_ci_high"], 0.95)  # raw floor would fail
+        self.assertNotEqual(row["verdict"], "regression")
+        self.assertEqual(row["verdict"], "inconclusive")
+
+    def test_non_saturating_real_coverage_regression_is_flagged(self):
+        # The fix must not mask genuine regressions: here the feature consistently
+        # reproduces only half of each baseline region it visits, i.e. far less of
+        # the baseline union than the baseline itself does, even though its relscore
+        # is higher. This must still be a regression.
+        thirds = [self._third(k) for k in range(3)]
+        baseline_trials = [thirds[i % 3] for i in range(6)]
+        feature_trials = []
+        for i in range(6):
+            k = i % 3
+            half = {f"c{k}-{j}" for j in range(5)}
+            feature_trials.append(half | {f"f{i}-{u}" for u in range(8)})
+        campaign = self._unpaired_campaign(baseline_trials, feature_trials)
+        row, _ = self._relscore_row("by_target/loss", campaign)
+        self.assertEqual(row["verdict"], "regression")
+        self.assertIn("floor", row["reason"])
         self.assertGreater(row["feature_sample_mean"], row["baseline_sample_mean"])
 
     def test_target_regression_blocks_aggregate_improvement(self):
