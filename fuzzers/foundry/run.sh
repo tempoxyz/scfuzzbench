@@ -113,7 +113,15 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${sho
   showmap_dir="${SCFUZZBENCH_LOG_DIR}/showmap"
   showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
   showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
-  showmap_corpus_dir="${FOUNDRY_SHOWMAP_CORPUS_DIR:-${SCFUZZBENCH_CORPUS_DIR:-}}"
+  # Do NOT default --showmap-corpus-dir to SCFUZZBENCH_CORPUS_DIR. For invariant
+  # tests forge persists the corpus under a per-contract subdir of the configured
+  # `[invariant] corpus_dir` (e.g. `corpus/foundry/<Contract>`), and when
+  # --showmap-corpus-dir is omitted the showmap replay resolves that same
+  # per-test path from config. Passing the un-nested base dir here makes the
+  # replay read an empty directory ("replay: 0 entries, 0 files"), which yields
+  # empty showmap coverage and an empty differential-coverage report. Only honor
+  # an explicit FOUNDRY_SHOWMAP_CORPUS_DIR override.
+  showmap_corpus_dir="${FOUNDRY_SHOWMAP_CORPUS_DIR:-}"
   showmap_args=(
     --showmap-out "${showmap_dir}"
     --showmap-approach "${SCFUZZBENCH_FUZZER_LABEL}"

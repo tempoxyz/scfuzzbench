@@ -114,13 +114,14 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
 
             showmap_out_idx = replay_args.index("--showmap-out")
             showmap_trial_idx = replay_args.index("--showmap-trial")
-            showmap_corpus_idx = replay_args.index("--showmap-corpus-dir")
             self.assertEqual(replay_args[showmap_out_idx + 1], str(log_dir / "showmap"))
             self.assertEqual(replay_args[showmap_trial_idx + 1], "bench-trial")
-            self.assertEqual(
-                replay_args[showmap_corpus_idx + 1],
-                str(work_dir / "target" / "corpus" / "foundry"),
-            )
+            # Without an explicit FOUNDRY_SHOWMAP_CORPUS_DIR override we must NOT
+            # pass --showmap-corpus-dir: forge then resolves the per-test corpus
+            # dir from config (`[invariant] corpus_dir/<Contract>`), which is the
+            # actual directory the fuzz campaign persisted the corpus to. Passing
+            # the un-nested base dir would make the replay read an empty directory.
+            self.assertNotIn("--showmap-corpus-dir", replay_args)
 
     def test_showmap_replay_uses_explicit_corpus_override_only_when_set(self):
         with tempfile.TemporaryDirectory() as tmp:
