@@ -59,6 +59,14 @@ TEXT_GAS_COUNT_PATTERNS = [
 
 DEFAULT_SHOWMAP_MAX_WORK_ITEMS = 50_000_000
 DEFAULT_MIN_VERDICT_SAMPLES = 6
+# Per-test (`by_test/...`) campaigns are emitted for human drill-down only: their
+# verdicts feed neither the aggregate verdict (see `_is_target_family_campaign`)
+# nor any downstream report consumer. Running the full per-campaign statistics
+# (BCa bootstrap CIs + non-inferiority tests) for every invariant across every
+# target/round/arm dominates analysis time, so the verdict/bootstrap is skipped
+# for `by_test` campaigns by default. Their point relscore/relcov values are still
+# emitted in the relscores/relcov CSVs and as cheap inconclusive summary rows.
+DEFAULT_DIFFCOV_VERDICT_BY_TEST = False
 DEFAULT_AUTOTUNE_VALIDATION = "leave-one-target-out"
 DEFAULT_RELCOV_NONINFERIORITY_DELTA = 0.05
 A12_MEANINGFUL_HIGH = 0.56
@@ -2001,6 +2009,10 @@ def _is_target_family_campaign(campaign_name: str) -> bool:
     return campaign_name.startswith("by_target/") and "/by_test/" not in campaign_name
 
 
+def _is_by_test_campaign(campaign_name: str) -> bool:
+    return campaign_name.startswith("by_test/") or "/by_test/" in campaign_name
+
+
 def per_sample_relscores(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, Dict[str, float]]:
@@ -2490,6 +2502,13 @@ def showmap_max_work_items_from_env() -> int:
     return max(value, 0)
 
 
+def diffcov_verdict_by_test_from_env() -> bool:
+    raw = os.environ.get("SCFUZZBENCH_DIFFCOV_VERDICT_BY_TEST")
+    if raw is None or raw == "":
+        return DEFAULT_DIFFCOV_VERDICT_BY_TEST
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _format_csv_float(value: Any) -> str:
     if value is None:
         return "insufficient n"
@@ -2505,7 +2524,10 @@ def write_differential_coverage_outputs(
     confidence_level: float = 0.95,
     min_samples: int = DEFAULT_MIN_VERDICT_SAMPLES,
     noninferiority_delta: float = DEFAULT_RELCOV_NONINFERIORITY_DELTA,
+    verdict_by_test: Optional[bool] = None,
 ) -> None:
+    if verdict_by_test is None:
+        verdict_by_test = diffcov_verdict_by_test_from_env()
     trials, skipped = load_showmap_trials(logs_dir, excluded_fuzzers)
     campaigns = build_showmap_campaigns(trials)
     campaign_root = out_dir / "showmap_campaigns"
@@ -2523,6 +2545,7 @@ def write_differential_coverage_outputs(
     if max_work_items is None:
         max_work_items = showmap_max_work_items_from_env()
     manifest["max_work_items"] = max_work_items
+    manifest["verdict_by_test"] = verdict_by_test
 
     for campaign_name, campaign in sorted(campaigns.items()):
         if not campaign:
@@ -2585,8 +2608,19 @@ def write_differential_coverage_outputs(
             writer.writerow([campaign_name, approach, reference, f"{relcov:.6f}"])
 
     summary_csv = out_dir / "differential_coverage_summary.csv"
+    # Only the per-target and combined campaigns drive verdicts; `by_test`
+    # campaigns are drill-down only. Running the bootstrap statistics for each
+    # invariant across every target/round/arm is the dominant analysis cost, so
+    # exclude them from the verdict path by default. Their point relscore/relcov
+    # values still land in the dedicated CSVs and as cheap inconclusive summary
+    # rows below (verdict_by_key has no entry, so they default to inconclusive).
+    verdict_summary_rows = (
+        summary_rows
+        if verdict_by_test
+        else [row for row in summary_rows if not _is_by_test_campaign(row[0])]
+    )
     verdict_rows, verdict_state = build_differential_coverage_verdict_rows(
-        summary_rows,
+        verdict_summary_rows,
         campaigns,
         confidence_level=confidence_level,
         pairing_mode=pairing_mode,
@@ -2745,6 +2779,17 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RELCOV_NONINFERIORITY_DELTA,
         help="Allowed absolute relcov loss versus baseline reliability before coverage is a regression.",
     )
+    run_parser.add_argument(
+        "--verdict-by-test",
+        dest="verdict_by_test",
+        action="store_true",
+        default=None,
+        help=(
+            "Compute full bootstrap verdicts for per-test (by_test/...) campaigns. "
+            "Off by default (drill-down only); these verdicts feed no consumer and "
+            "dominate analysis time. Overrides SCFUZZBENCH_DIFFCOV_VERDICT_BY_TEST."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2818,6 +2863,7 @@ def main() -> int:
             confidence_level=args.confidence_level,
             min_samples=args.min_samples,
             noninferiority_delta=args.noninferiority_delta,
+            verdict_by_test=args.verdict_by_test,
         )
         return 0
     return 1

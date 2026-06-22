@@ -359,6 +359,71 @@ class DifferentialCoverageTests(unittest.TestCase):
             self.assertEqual(scores[("combined", "foundry-master")], "1.000000")
             self.assertEqual(scores[(f"by_test/{suite_name}", "foundry-feature")], "0.000000")
 
+    def test_by_test_campaigns_excluded_from_verdicts_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            suite_name = "test_ShowmapCounter.t.sol_ShowmapCounterTest"
+            master_showmap = (
+                root / "logs" / "i-aaa-foundry-master" / "showmap" / f"foundry-master__{suite_name}"
+            )
+            feature_showmap = (
+                root / "logs" / "i-bbb-foundry-feature" / "showmap" / f"foundry-feature__{suite_name}"
+            )
+            master_showmap.mkdir(parents=True)
+            feature_showmap.mkdir(parents=True)
+            (master_showmap / "trial-1.txt").write_text("1:1\n2:1\n", encoding="utf-8")
+            (feature_showmap / "trial-1.txt").write_text("1:1\n", encoding="utf-8")
+
+            # Default: by_test campaigns get no bootstrap verdict row...
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(root / "logs", out_dir)
+
+            stats = json.loads((out_dir / "differential_coverage_statistics.json").read_text())
+            stats_campaigns = {row["campaign"] for row in stats["rows"]}
+            self.assertNotIn(f"by_test/{suite_name}", stats_campaigns)
+            self.assertIn("combined", stats_campaigns)
+
+            manifest = json.loads((out_dir / "showmap_campaign_manifest.json").read_text())
+            self.assertFalse(manifest["verdict_by_test"])
+
+            # ...but their point relscores are still emitted...
+            with (out_dir / "differential_coverage_relscores.csv").open(newline="") as handle:
+                scores = {(r["campaign"], r["approach"]): r["relscore"] for r in csv.DictReader(handle)}
+            self.assertIn((f"by_test/{suite_name}", "foundry-master"), scores)
+
+            # ...and they appear in the summary CSV as cheap inconclusive rows.
+            with (out_dir / "differential_coverage_summary.csv").open(newline="") as handle:
+                summary = {(r["campaign"], r["metric"]): r for r in csv.DictReader(handle)}
+            by_test_row = summary[(f"by_test/{suite_name}", "relscore")]
+            self.assertEqual(by_test_row["verdict"], "inconclusive")
+            self.assertEqual(by_test_row["p_value"], "")
+
+    def test_by_test_verdicts_can_be_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            suite_name = "test_ShowmapCounter.t.sol_ShowmapCounterTest"
+            master_showmap = (
+                root / "logs" / "i-aaa-foundry-master" / "showmap" / f"foundry-master__{suite_name}"
+            )
+            feature_showmap = (
+                root / "logs" / "i-bbb-foundry-feature" / "showmap" / f"foundry-feature__{suite_name}"
+            )
+            master_showmap.mkdir(parents=True)
+            feature_showmap.mkdir(parents=True)
+            (master_showmap / "trial-1.txt").write_text("1:1\n2:1\n", encoding="utf-8")
+            (feature_showmap / "trial-1.txt").write_text("1:1\n", encoding="utf-8")
+
+            out_dir = root / "out"
+            analyze.write_differential_coverage_outputs(
+                root / "logs", out_dir, verdict_by_test=True
+            )
+
+            stats = json.loads((out_dir / "differential_coverage_statistics.json").read_text())
+            stats_campaigns = {row["campaign"] for row in stats["rows"]}
+            self.assertIn(f"by_test/{suite_name}", stats_campaigns)
+            manifest = json.loads((out_dir / "showmap_campaign_manifest.json").read_text())
+            self.assertTrue(manifest["verdict_by_test"])
+
     def test_parses_real_foundry_showmap_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

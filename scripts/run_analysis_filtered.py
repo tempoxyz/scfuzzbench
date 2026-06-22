@@ -64,6 +64,17 @@ def main() -> int:
         default=analyze.DEFAULT_RELCOV_NONINFERIORITY_DELTA,
         help="Allowed absolute relcov loss versus baseline reliability before coverage is a regression.",
     )
+    parser.add_argument(
+        "--verdict-by-test",
+        dest="verdict_by_test",
+        action="store_true",
+        default=None,
+        help=(
+            "Compute full bootstrap verdicts for per-test (by_test/...) campaigns. "
+            "Off by default (drill-down only); these verdicts feed no consumer and "
+            "dominate analysis time. Overrides SCFUZZBENCH_DIFFCOV_VERDICT_BY_TEST."
+        ),
+    )
     args = parser.parse_args()
 
     timings: Dict[str, float] = {}
@@ -130,6 +141,7 @@ def main() -> int:
             confidence_level=args.confidence_level,
             min_samples=args.min_samples,
             noninferiority_delta=args.noninferiority_delta,
+            verdict_by_test=args.verdict_by_test,
         )
     with (args.out_dir / "analysis_timing.json").open("w", encoding="utf-8") as handle:
         json.dump(

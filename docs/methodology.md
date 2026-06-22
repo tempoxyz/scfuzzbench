@@ -158,6 +158,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
 - Analysis normalizes raw Foundry showmap output into canonical campaign directories before scoring:
   - `showmap_campaigns/combined/<approach>/<trial>.txt` unions all showmap files for each trial.
   - `showmap_campaigns/by_test/<suite-test>/<approach>/<trial>.txt` preserves per-test drill-down campaigns.
+- `by_test/...` campaigns are drill-down only: their point relscore/relcov values are emitted in the relscore/relcov CSVs and as inconclusive summary rows, but the full per-campaign bootstrap verdict is skipped by default because it feeds neither the aggregate verdict nor any report consumer and otherwise dominates analysis time. Set `--verdict-by-test` (or `SCFUZZBENCH_DIFFCOV_VERDICT_BY_TEST=1`) to compute them.
 - Relscore and relcov are computed through the `differential-coverage` package from normalized AFL showmap campaign directories. Only positive AFL showmap counts are treated as covered edges.
 - Relcov gating compares the feature's per-trial retention of `upper(baseline)` against the baseline reliability diagonal, not against an absolute coverage floor. The default non-inferiority margin is 0.05 relcov.
 - When a campaign has one baseline approach (`master`, `main`, `stable`, or a `*-master`/`*-main` label) and one feature approach, `differential_coverage_summary.csv` records separate `relscore` and `relcov` metric rows with the same reported verdict:
