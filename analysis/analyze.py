@@ -1799,23 +1799,87 @@ def showmap_campaign_work_items(campaign: Dict[str, Dict[str, Set[str]]]) -> int
 def calculate_relscores(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, float]:
-    return {
-        approach: float(score)
-        for approach, score in DifferentialCoverage(campaign).relscores().items()
-    }
+    """Compute relscores for a campaign.
+
+    This is a fast, allocation-light reimplementation of
+    ``differential_coverage.DifferentialCoverage.relscores`` that produces
+    numerically identical results (see ``test_differential_coverage`` for the
+    equivalence checks against the upstream library).
+
+    The upstream implementation is ``O(|all_edges| * |trials|^2)`` per approach
+    because ``ApproachData.edges_by_trial`` rebuilds every trial's frozenset on
+    each property access, and that access happens once per edge inside
+    ``_calculate_relscore``. For the ``combined`` and ``by_target`` campaigns
+    (hundreds of trials, tens of thousands of edges) this dominated the entire
+    analysis step, taking >300s for ``combined`` alone. The implementation
+    below is ``O(sum of trial sizes)`` per approach.
+    """
+    # Per-approach edge union, plus a count of how many approaches' unions
+    # contain each edge (used to derive how many approaches never hit an edge).
+    unions: Dict[str, Set[str]] = {}
+    approaches_containing_edge: Dict[str, int] = defaultdict(int)
+    for approach, trials in campaign.items():
+        union: Set[str] = set()
+        for edges in trials.values():
+            union.update(edges)
+        unions[approach] = union
+        for edge in union:
+            approaches_containing_edge[edge] += 1
+
+    num_approaches = len(campaign)
+    scores: Dict[str, float] = {}
+    for approach, trials in campaign.items():
+        trials_with_non_empty_cov = sum(1 for edges in trials.values() if edges)
+        if trials_with_non_empty_cov == 0:
+            scores[approach] = 0.0
+            continue
+        # hit_count[edge] = number of this approach's trials that hit `edge`.
+        hit_count: Dict[str, int] = defaultdict(int)
+        for edges in trials.values():
+            for edge in edges:
+                hit_count[edge] += 1
+        # score = sum over edges of (#approaches that never hit edge) *
+        #         (#trials of this approach that hit edge) / trials_non_empty.
+        # Edges this approach never hits contribute 0, so iterating its own
+        # hit_count is equivalent to iterating all_edges.
+        total = 0
+        for edge, count in hit_count.items():
+            never_hit = num_approaches - approaches_containing_edge[edge]
+            total += never_hit * count
+        scores[approach] = float(total) / trials_with_non_empty_cov
+    return scores
 
 
 def calculate_relcovs(
     campaign: Dict[str, Dict[str, Set[str]]],
 ) -> Dict[str, Dict[str, float]]:
-    dc = DifferentialCoverage(campaign)
-    return {
-        approach: {
-            reference: float(dc.approaches[approach].relcov(dc.approaches[reference]))
-            for reference in dc.approaches
-        }
-        for approach in dc.approaches
+    """Compute pairwise relcov for a campaign.
+
+    Equivalent to calling ``ApproachData.relcov`` (median value reducer, union
+    collection reducer) for every (approach, reference) pair, but without
+    rebuilding the upstream ``edges_by_trial`` frozensets.
+    """
+    unions: Dict[str, Set[str]] = {
+        approach: set().union(*trials.values()) if trials else set()
+        for approach, trials in campaign.items()
     }
+    result: Dict[str, Dict[str, float]] = {}
+    for approach, trials in campaign.items():
+        trial_edge_sets = list(trials.values())
+        row: Dict[str, float] = {}
+        for reference in campaign:
+            reference_union = unions[reference]
+            reference_size = len(reference_union)
+            if reference_size == 0:
+                row[reference] = 0.0
+                continue
+            ratios = [
+                len(edges & reference_union) / reference_size
+                for edges in trial_edge_sets
+            ]
+            row[reference] = float(statistics.median(ratios)) if ratios else 0.0
+        result[approach] = row
+    return result
 
 
 def find_baseline_feature(approaches: Iterable[str]) -> Optional[Tuple[str, str]]:
