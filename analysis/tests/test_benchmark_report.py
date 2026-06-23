@@ -34,6 +34,27 @@ def _make_metrics(fuzzer, final_values, runs=None, **kwargs):
 
 
 class BenchmarkReportTests(unittest.TestCase):
+    def test_shorten_series_label(self):
+        # Matrix labels collapse to "<arm> · <target>", staying distinct.
+        self.assertEqual(
+            "master · aave-v4",
+            benchmark_report.shorten_series_label("foundry-master__target-aave-v4"),
+        )
+        self.assertEqual(
+            "pr-15316 · superform-v2-periphery",
+            benchmark_report.shorten_series_label(
+                "foundry-pr-15316__target-superform-v2-periphery"
+            ),
+        )
+        # Same arm, different targets stay distinguishable (no collision).
+        self.assertNotEqual(
+            benchmark_report.shorten_series_label("foundry-master__target-aave-v4"),
+            benchmark_report.shorten_series_label("foundry-master__target-liquity"),
+        )
+        # Anonymized and non-matrix labels pass through unchanged.
+        self.assertEqual("Fuzzer A", benchmark_report.shorten_series_label("Fuzzer A"))
+        self.assertEqual("foundry", benchmark_report.shorten_series_label("foundry"))
+
     def test_build_fuzzer_color_map_is_alphabetical_and_stable(self):
         colors_a = plot_palette.build_fuzzer_color_map(
             ["medusa", "foundry", "echidna", "medusa"]

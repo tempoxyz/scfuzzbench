@@ -466,6 +466,26 @@ def nan_percentile_rows(arr: np.ndarray, percentile_value: float) -> np.ndarray:
     return out
 
 
+def shorten_series_label(label: str) -> str:
+    """Make a chart legend / tick label readable.
+
+    Matrix analysis labels look like ``<engine>-<arm>__target-<target>`` (e.g.
+    ``foundry-master__target-aave-v4``). The raw string is long and, on combined
+    charts with several arms/targets, makes the legend overflow the plot. Render
+    it as ``<arm> · <target>`` and drop the redundant engine prefix so series
+    stay distinct but compact. Anonymized labels (``Fuzzer A``) and labels
+    without the matrix shape are returned unchanged.
+    """
+    arm, sep, target = label.partition("__target-")
+    for prefix in ("foundry-", "medusa-", "echidna-", "recon-"):
+        if arm.startswith(prefix):
+            arm = arm[len(prefix) :]
+            break
+    if sep:
+        return f"{arm} · {target}"
+    return arm or label
+
+
 def plot_metric_over_time(
     *,
     metric_df: pd.DataFrame,
@@ -486,6 +506,7 @@ def plot_metric_over_time(
 
     for fuzzer, group in metric_df.groupby("fuzzer", sort=False):
         label = label_map.get(str(fuzzer), str(fuzzer)) if label_map else str(fuzzer)
+        label = shorten_series_label(label)
         color = fuzzer_colors.get(str(fuzzer)) if fuzzer_colors else None
         if color is None:
             color = ax._get_lines.get_next_color()
@@ -524,9 +545,9 @@ def plot_metric_over_time(
     plt.title(title)
     plt.xlabel("Elapsed time (hours)")
     plt.ylabel(ylabel)
-    plt.legend()
+    plt.legend(loc="best", fontsize=8)
     plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
     return True
 
@@ -709,6 +730,7 @@ def plot_bugs_over_time(
     ax = plt.gca()
     for fuzzer, group in df_grid.groupby("fuzzer", sort=False):
         fuzzer_label = label_map.get(str(fuzzer), str(fuzzer)) if label_map else str(fuzzer)
+        fuzzer_label = shorten_series_label(fuzzer_label)
         pivot = (
             group.pivot_table(
                 index="time_hours", columns="run_id", values="bugs_found", aggfunc="max"
@@ -726,9 +748,11 @@ def plot_bugs_over_time(
         if color is None:
             color = ax._get_lines.get_next_color()
 
-        # Individual runs (faint dotted lines)
-        run_labels = [str(run_id).split(":", 1)[-1] for run_id in pivot.columns]
-        for col, run_label in enumerate(run_labels):
+        # Individual runs (faint dotted lines). These are not labeled
+        # individually: one entry per run would flood the legend (and, for
+        # matrix runs, repeat an uninformative instance id). The median line
+        # below carries the legend entry for the series.
+        for col in range(arr.shape[1]):
             plt.step(
                 time,
                 np.rint(arr[:, col]),
@@ -737,7 +761,7 @@ def plot_bugs_over_time(
                 alpha=0.35,
                 color=color,
                 linestyle=":",
-                label=f"{fuzzer_label} {run_label}",
+                label="_nolegend_",
             )
 
         # IQR shading
@@ -758,9 +782,9 @@ def plot_bugs_over_time(
     plt.xlabel("Elapsed time (hours)")
     plt.ylabel("Bugs found (cumulative count)")
     plt.yticks(range(0, int(df_grid["bugs_found"].max()) + 2))
-    plt.legend()
+    plt.legend(loc="best", fontsize=8)
     plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
 
 
@@ -771,7 +795,10 @@ def plot_time_to_k(
     label_map: dict[str, str] | None,
 ) -> None:
     plt.figure(figsize=(9, 5))
-    fuzzers = [label_map.get(m.fuzzer, m.fuzzer) if label_map else m.fuzzer for m in metrics]
+    fuzzers = [
+        shorten_series_label(label_map.get(m.fuzzer, m.fuzzer) if label_map else m.fuzzer)
+        for m in metrics
+    ]
     x = np.arange(len(fuzzers))
     width = 0.8 / max(1, len(ks))
     sorted_ks = sorted(ks)
@@ -790,12 +817,12 @@ def plot_time_to_k(
             color=k_colors[k],
         )
 
-    plt.xticks(x, fuzzers)
+    plt.xticks(x, fuzzers, rotation=20, ha="right", fontsize=8)
     plt.ylabel("Median time-to-k (hours)")
     plt.title("Median time-to-k (lower is better; NaN means never reached)")
-    plt.legend()
+    plt.legend(loc="best", fontsize=8)
     plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
 
 
@@ -818,7 +845,11 @@ def plot_final_distribution(
             .astype(float)
         )
         data.append(pivot.iloc[-1].to_numpy(dtype=float))
-        labels.append(label_map.get(str(fuzzer), str(fuzzer)) if label_map else str(fuzzer))
+        labels.append(
+            shorten_series_label(
+                label_map.get(str(fuzzer), str(fuzzer)) if label_map else str(fuzzer)
+            )
+        )
         box_colors.append(
             fuzzer_colors.get(str(fuzzer), "#333333")
             if fuzzer_colors
@@ -837,10 +868,11 @@ def plot_final_distribution(
             cap.set_color(color)
 
     plt.ylim(bottom=0)
+    plt.xticks(rotation=20, ha="right", fontsize=8)
     plt.ylabel("Bugs found at end of budget")
     plt.title("End-of-budget bug count distribution (per run)")
     plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
 
 
@@ -848,7 +880,10 @@ def plot_plateau_and_late_share(
     metrics: List[FuzzerMetrics], outpath: Path, label_map: dict[str, str] | None
 ) -> None:
     plt.figure(figsize=(9, 5))
-    fuzzers = [label_map.get(m.fuzzer, m.fuzzer) if label_map else m.fuzzer for m in metrics]
+    fuzzers = [
+        shorten_series_label(label_map.get(m.fuzzer, m.fuzzer) if label_map else m.fuzzer)
+        for m in metrics
+    ]
     plateau = [m.plateau_time for m in metrics]
     late = [m.late_share for m in metrics]
 
@@ -873,10 +908,11 @@ def plot_plateau_and_late_share(
         color=late_color,
     )
 
-    plt.xticks(x, fuzzers)
+    plt.xticks(x, fuzzers, rotation=20, ha="right", fontsize=8)
     plt.title("Plateau time and late discovery share")
+    plt.legend(loc="best", fontsize=8)
     plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
 
 
