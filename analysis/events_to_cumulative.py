@@ -14,6 +14,13 @@ REQUIRED_EVENT_COLS = {
 }
 
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
+# Matrix/aggregated runs are flattened by the workflows collector into one
+# per-target directory, with each round's log files renamed to
+# "<run_id>-<original_name>" where <run_id> ends in "logs.zip". Recover that
+# per-round prefix so zero-event seeding produces one entry per round instead of
+# collapsing every round into a single "unknown" run. Mirrors analyze.py.
+MATRIX_RUN_PREFIX_RE = re.compile(r"^(?P<run_id>.*logs\.zip)-(?P<name>.+)$")
+IGNORED_LOG_FILENAMES = {"runner_commands.log"}
 
 
 def die(msg: str) -> None:
@@ -68,15 +75,29 @@ def inventory_runs_from_logs(
     exclude_fuzzers: Optional[set[str]] = None,
     raw_labels: bool = False,
 ) -> List[Tuple[str, str]]:
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    fallback_run_id = run_id or infer_run_id(logs_dir) or "unknown"
     runs: List[Tuple[str, str]] = []
-    for instance_dir in sorted([p for p in logs_dir.iterdir() if p.is_dir()]):
-        instance_id, fuzzer_label = split_instance_label(instance_dir.name)
+    seen: set[Tuple[str, str]] = set()
+    for path in sorted(logs_dir.rglob("*")):
+        if not path.is_file() or not path.name.endswith(".log"):
+            continue
+        if path.name in IGNORED_LOG_FILENAMES:
+            continue
+        rel = path.relative_to(logs_dir)
+        if len(rel.parts) < 2:
+            continue
+        instance_id, fuzzer_label = split_instance_label(rel.parts[0])
         fuzzer = fuzzer_label if raw_labels else normalize_fuzzer(fuzzer_label)
         if exclude_fuzzers:
             if str(fuzzer).lower() in exclude_fuzzers or fuzzer_label.lower() in exclude_fuzzers:
                 continue
-        runs.append((fuzzer, f"{run_id_value}:{instance_id}"))
+        matrix_match = MATRIX_RUN_PREFIX_RE.match(path.name)
+        file_run_id = run_id or (matrix_match.group("run_id") if matrix_match else None) or fallback_run_id
+        entry = (fuzzer, f"{file_run_id}:{instance_id}")
+        if entry in seen:
+            continue
+        seen.add(entry)
+        runs.append(entry)
     return runs
 
 
