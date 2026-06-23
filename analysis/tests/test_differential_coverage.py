@@ -8,8 +8,9 @@ from pathlib import Path
 from analysis import analyze
 
 try:
-    # Optional: only used to cross-check the local implementation against the reference.
-    # analyze.py no longer depends on this package at runtime.
+    # Reference implementation for the parity checks below. analyze.py's hot
+    # CSV path now computes relscore/relcov locally, but the verdict path still
+    # uses this package, so it remains a runtime dependency.
     from differential_coverage import DifferentialCoverage
 except ImportError:
     DifferentialCoverage = None

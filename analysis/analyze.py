@@ -1801,10 +1801,13 @@ def calculate_relscores(
 ) -> Dict[str, float]:
     """Compute relscores for a campaign.
 
-    This is a fast, allocation-light reimplementation of
-    ``differential_coverage.DifferentialCoverage.relscores`` that produces
-    numerically identical results (see ``test_differential_coverage`` for the
-    equivalence checks against the upstream library).
+    Fast, allocation-light reimplementation of
+    ``differential_coverage.DifferentialCoverage.relscores``. For valid
+    scfuzzbench campaigns it computes the same mathematical relscore (see
+    ``test_differential_coverage`` for parity checks against the upstream
+    library). It may differ from the library by ordinary floating-point
+    roundoff: the library divides and accumulates a float per edge, while this
+    sums exact integer products and divides once.
 
     The upstream implementation is ``O(|all_edges| * |trials|^2)`` per approach
     because ``ApproachData.edges_by_trial`` rebuilds every trial's frozenset on
