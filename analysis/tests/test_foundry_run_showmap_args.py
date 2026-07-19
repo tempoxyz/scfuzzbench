@@ -14,6 +14,7 @@ def write_common_sh(
     include_timeout: bool = False,
     main_exit_code: int = 0,
     record_upload: bool = False,
+    create_invariant_corpus: bool = True,
 ) -> Path:
     timeout_line = (
         '    printf \'\\t%s\' "${SCFUZZBENCH_TIMEOUT_SECONDS}"\n'
@@ -33,6 +34,11 @@ def write_common_sh(
   fi"""
         if main_exit_code
         else ""
+    )
+    corpus_setup = (
+        'mkdir -p "${SCFUZZBENCH_CORPUS_DIR}/CryticToFoundry"'
+        if create_invariant_corpus
+        else ":"
     )
     common_sh = tmp_dir / "common.sh"
     common_sh.write_text(
@@ -66,6 +72,9 @@ run_with_timeout() {{
     for arg in "$@"; do printf '\\t%s' "$arg"; done
     printf '\\n'
   }} >> "${{SCFUZZBENCH_LOG_DIR}}/commands.tsv"
+  if [[ "${{log_file}}" == *foundry.log ]]; then
+    {corpus_setup}
+  fi
 {main_exit_block}
   return 0
 }}
@@ -151,6 +160,30 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
             replay_args = commands[1][2:]
             corpus_idx = replay_args.index("--showmap-corpus-dir")
             self.assertEqual(replay_args[corpus_idx + 1], str(corpus_dir))
+
+    def test_showmap_skips_when_campaign_produces_no_invariant_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            log_dir = tmp_dir / "logs"
+            work_dir = tmp_dir / "work"
+            common_sh = write_common_sh(tmp_dir, create_invariant_corpus=False)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "SCFUZZBENCH_COMMON_SH": str(common_sh),
+                    "SCFUZZBENCH_WORKDIR": str(work_dir),
+                    "SCFUZZBENCH_LOG_DIR": str(log_dir),
+                    "SCFUZZBENCH_FOUNDRY_SHOWMAP": "1",
+                    "FOUNDRY_LABEL": "foundry-master",
+                }
+            )
+
+            subprocess.check_call(["bash", str(SCRIPT)], env=env)
+
+            commands = (log_dir / "commands.tsv").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("no persisted invariant corpus", (log_dir / "log.txt").read_text())
 
     def test_showmap_replay_uses_bounded_default_timeout(self):
         def run_case(timeout: str, override: str | None = None) -> list[list[str]]:

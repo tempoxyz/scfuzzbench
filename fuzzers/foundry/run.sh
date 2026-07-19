@@ -110,9 +110,6 @@ fi
 showmap_enabled="${SCFUZZBENCH_FOUNDRY_SHOWMAP:-1}"
 showmap_enabled_lc=$(printf '%s' "${showmap_enabled}" | tr '[:upper:]' '[:lower:]')
 if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${showmap_enabled_lc}" == "yes" ]]; then
-  showmap_dir="${SCFUZZBENCH_LOG_DIR}/showmap"
-  showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
-  showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
   # Do NOT default --showmap-corpus-dir to SCFUZZBENCH_CORPUS_DIR. For invariant
   # tests forge persists the corpus under a per-contract subdir of the configured
   # `[invariant] corpus_dir` (e.g. `corpus/foundry/<Contract>`), and when
@@ -122,6 +119,17 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${sho
   # empty showmap coverage and an empty differential-coverage report. Only honor
   # an explicit FOUNDRY_SHOWMAP_CORPUS_DIR override.
   showmap_corpus_dir="${FOUNDRY_SHOWMAP_CORPUS_DIR:-}"
+  # Foundry appends the invariant contract name below the configured corpus root
+  # and only creates that directory after it persists a coverage-winning input.
+  # A valid short campaign can therefore have no replayable corpus. Do not invoke
+  # showmap in that case: Forge correctly reports the missing per-contract path as
+  # an error, but it is not a failed fuzz campaign.
+  if [[ -z "${showmap_corpus_dir}" ]] && ! find "${SCFUZZBENCH_CORPUS_DIR}" -mindepth 1 -maxdepth 1 -type d -print -quit | grep -q .; then
+    log "Skipping Foundry showmap replay: no persisted invariant corpus was produced."
+  else
+    showmap_dir="${SCFUZZBENCH_LOG_DIR}/showmap"
+    showmap_log_file="${SCFUZZBENCH_LOG_DIR}/foundry_showmap.log"
+    showmap_trial="${SCFUZZBENCH_RUN_ID:-${SCFUZZBENCH_INSTANCE_ID:-$(hostname)}}"
   showmap_args=(
     --showmap-out "${showmap_dir}"
     --showmap-approach "${SCFUZZBENCH_FUZZER_LABEL}"
@@ -172,6 +180,7 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${sho
     log "Foundry showmap replay failed; continuing with original forge test exit code ${exit_code}."
   if [[ -n "${original_timeout}" ]]; then
     SCFUZZBENCH_TIMEOUT_SECONDS="${original_timeout}"
+  fi
   fi
 fi
 popd >/dev/null
