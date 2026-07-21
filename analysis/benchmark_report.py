@@ -37,6 +37,7 @@ PROGRESS_SAMPLE_VALUE_COLS = [
     "coverage_proxy",
     "corpus_size",
 ]
+FOUNDRY_AGGREGATED_SOURCE = "json-metrics-aggregated"
 
 
 VERDICT_COLORS = {
@@ -283,7 +284,7 @@ def load_progress_metrics_summary(path: Path) -> Dict[str, ProgressMetricsSummar
 
 def load_metric_samples_csv(path: Path, value_columns: List[str]) -> pd.DataFrame:
     if not path.exists():
-        cols = ["fuzzer", "series_id", "time_hours", *value_columns]
+        cols = ["fuzzer", "series_id", "time_hours", "source", *value_columns]
         return pd.DataFrame(columns=cols)
 
     df = pd.read_csv(path)
@@ -302,8 +303,13 @@ def load_metric_samples_csv(path: Path, value_columns: List[str]) -> pd.DataFram
     for col in value_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    if "source" not in df.columns:
+        df["source"] = ""
+    else:
+        df["source"] = df["source"].fillna("").astype(str)
+
     df = df.dropna(subset=["time_hours"])
-    return df[["fuzzer", "series_id", "time_hours", *value_columns]]
+    return df[["fuzzer", "series_id", "time_hours", "source", *value_columns]]
 
 
 def resample_metric_samples_to_grid(
@@ -314,11 +320,27 @@ def resample_metric_samples_to_grid(
 
     out: List[pd.DataFrame] = []
     for (fuzzer, series_id), group in samples_df.groupby(["fuzzer", "series_id"], sort=False):
-        g = group[["time_hours", value_column]].dropna()
+        if "source" not in group.columns:
+            group = group.assign(source="")
+        g = group[["time_hours", "source", value_column]].dropna(
+            subset=["time_hours", value_column]
+        )
         if g.empty:
             continue
         g = g.sort_values("time_hours")
-        g = g.groupby("time_hours", as_index=False)[value_column].mean()
+        if fuzzer == "foundry" and value_column in ("coverage_proxy", "corpus_size"):
+            grouped = g.groupby("time_hours", as_index=False, sort=False)
+            means = grouped[value_column].mean()
+            maxima = grouped[value_column].max()
+            all_aggregated = grouped["source"].agg(
+                lambda sources: sources.eq(FOUNDRY_AGGREGATED_SOURCE).all()
+            )
+            means[value_column] = np.where(
+                all_aggregated["source"], maxima[value_column], means[value_column]
+            )
+            g = means
+        else:
+            g = g.groupby("time_hours", as_index=False)[value_column].mean()
         series = pd.Series(g[value_column].to_numpy(dtype=float), index=g["time_hours"].to_numpy(dtype=float))
         reindexed = series.reindex(grid, method="ffill")
         out.append(
@@ -409,7 +431,7 @@ def append_progress_metrics_section(
 
     lines.append("## Progress metrics from logs (fuzzer-specific proxies)")
     lines.append(
-        "Coverage/corpus values are parsed from each fuzzer's native progress output and are useful for trend context, not strict cross-fuzzer equivalence."
+        "Coverage/corpus values are parsed from each fuzzer's native progress output and are useful for trend context, not strict cross-fuzzer equivalence. Foundry values sum its worker-local cumulative streams into one run-level proxy."
     )
     header = [
         "Fuzzer",

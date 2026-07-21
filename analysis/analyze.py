@@ -32,6 +32,7 @@ IGNORED_LOG_FILENAMES = {"runner_commands.log"}
 ABS_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} [0-9:.]+)\]")
 MEDUSA_ELAPSED_RE = re.compile(r"elapsed:\s*([0-9hms]+)")
 FOUNDATION_JSON_RE = re.compile(r"^\s*\{.*\}\s*$")
+FOUNDRY_AGGREGATED_SOURCE = "json-metrics-aggregated"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 FALSIFIED_RE = re.compile(r"Test\s+([^\s]+)\s+falsified!")
 ECHIDNA_FAILED_RE = re.compile(r"^([A-Za-z0-9_]+)\([^)]*\):\s+failed!")
@@ -204,6 +205,157 @@ class ProgressMetricsSample:
     failure_rate: Optional[float]
     source: str
     log_path: str
+
+
+class FoundryProgressAccumulator:
+    """Aggregates worker-local Foundry pulse metrics into one run-level series."""
+
+    def __init__(self) -> None:
+        self._counter_values: Dict[Tuple[str, int, str], float] = {}
+        self._counter_totals: Dict[str, float] = defaultdict(float)
+        self._gauge_values: Dict[Tuple[str, int, str], float] = {}
+        self._gauge_totals: Dict[str, float] = defaultdict(float)
+
+    @staticmethod
+    def stream_id(payload: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+        if payload.get("event") != "pulse":
+            return None
+        contract = payload.get("contract")
+        worker = payload.get("worker")
+        if not isinstance(contract, str) or not contract or not isinstance(worker, dict):
+            return None
+        worker_id = parse_optional_float(worker.get("id"))
+        if worker_id is None or not worker_id.is_integer():
+            return None
+        return contract, int(worker_id)
+
+    def _counter(
+        self, stream: Tuple[str, int], metric: str, value: Optional[float]
+    ) -> Optional[float]:
+        if value is None:
+            return self._counter_totals.get(metric)
+
+        key = (*stream, metric)
+        previous = self._counter_values.get(key)
+        # A lower value marks a restarted campaign stream. Count the new epoch from zero instead
+        # of allowing one worker or contract reset to pull the run-level series backwards.
+        delta = value if previous is None or value < previous else value - previous
+        self._counter_totals[metric] += delta
+        self._counter_values[key] = value
+        return self._counter_totals[metric]
+
+    def _gauge(
+        self, stream: Tuple[str, int], metric: str, value: Optional[float]
+    ) -> Optional[float]:
+        if value is None:
+            return self._gauge_totals.get(metric)
+
+        key = (*stream, metric)
+        previous = self._gauge_values.get(key, 0.0)
+        self._gauge_totals[metric] += value - previous
+        self._gauge_values[key] = value
+        return self._gauge_totals[metric]
+
+    def aggregate_stream(
+        self,
+        stream: Tuple[str, int],
+        coverage_proxy: Optional[float],
+        corpus_size: Optional[float],
+        favored_items: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        return (
+            self._counter(stream, "coverage_proxy", coverage_proxy),
+            self._counter(stream, "corpus_size", corpus_size),
+            self._gauge(stream, "favored_items", favored_items),
+        )
+
+
+def precompute_foundry_progress_aggregates(
+    path: Path,
+) -> Dict[
+    int,
+    Tuple[float, Optional[float], Optional[float], Optional[float]],
+]:
+    """Aggregates orderable Foundry pulses without changing raw log order."""
+    first_json_timestamp: Optional[float] = None
+    pulses: List[
+        Tuple[
+            float,
+            int,
+            Tuple[str, int],
+            Optional[float],
+            Optional[float],
+            Optional[float],
+        ]
+    ] = []
+
+    with path.open("r", errors="ignore") as handle:
+        for line_index, line in enumerate(handle):
+            clean_line = ANSI_ESCAPE_RE.sub("", line)
+            if not FOUNDATION_JSON_RE.match(clean_line):
+                continue
+            try:
+                payload = json.loads(clean_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            timestamp = parse_optional_float(payload.get("timestamp"))
+            if (
+                timestamp is not None
+                and math.isfinite(timestamp)
+                and first_json_timestamp is None
+            ):
+                first_json_timestamp = timestamp
+            stream = FoundryProgressAccumulator.stream_id(payload)
+            if timestamp is None or not math.isfinite(timestamp) or stream is None:
+                continue
+
+            _, coverage_proxy, corpus_size, favored_items, _, _ = (
+                parse_progress_metrics_from_payload(payload)
+            )
+            pulses.append(
+                (
+                    timestamp,
+                    line_index,
+                    stream,
+                    coverage_proxy,
+                    corpus_size,
+                    favored_items,
+                )
+            )
+
+    foundry_progress = FoundryProgressAccumulator()
+    aggregates: Dict[
+        int,
+        Tuple[float, Optional[float], Optional[float], Optional[float]],
+    ] = {}
+    if not pulses:
+        return aggregates
+
+    pulses.sort(key=lambda pulse: (pulse[0], pulse[1]))
+    # Preserve the raw parser's baseline when non-pulse JSON precedes progress output, while
+    # still allowing delayed earlier pulses to be ordered on a non-negative timeline.
+    first_timestamp = min(
+        first_json_timestamp if first_json_timestamp is not None else pulses[0][0],
+        pulses[0][0],
+    )
+    for (
+        timestamp,
+        line_index,
+        stream,
+        coverage_proxy,
+        corpus_size,
+        favored_items,
+    ) in pulses:
+        aggregates[line_index] = (
+            timestamp - first_timestamp,
+            *foundry_progress.aggregate_stream(
+                stream, coverage_proxy, corpus_size, favored_items
+            ),
+        )
+    return aggregates
 
 
 @dataclass(frozen=True)
@@ -997,6 +1149,10 @@ def parse_progress_metrics_log(
     path: Path, run_id: str, instance_id: str, fuzzer_label: str
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
+    is_foundry = normalize_fuzzer(fuzzer_label) == "foundry"
+    foundry_aggregates = (
+        precompute_foundry_progress_aggregates(path) if is_foundry else {}
+    )
     first_ts: Optional[float] = None
     first_abs_ts: Optional[float] = None
     last_elapsed: Optional[float] = None
@@ -1012,7 +1168,7 @@ def parse_progress_metrics_log(
     ] = None
 
     with path.open("r", errors="ignore") as handle:
-        for line in handle:
+        for line_index, line in enumerate(handle):
             clean_line = ANSI_ESCAPE_RE.sub("", line)
 
             absolute_ts = parse_timestamp(clean_line)
@@ -1059,6 +1215,14 @@ def parse_progress_metrics_log(
                     failure_rate,
                     source,
                 ) = parse_progress_metrics_from_payload(payload)
+                if line_index in foundry_aggregates:
+                    (
+                        elapsed_seconds,
+                        coverage_proxy,
+                        corpus_size,
+                        favored_items,
+                    ) = foundry_aggregates[line_index]
+                    source = FOUNDRY_AGGREGATED_SOURCE
             else:
                 seq_per_second = parse_rate_from_text(clean_line, SEQ_RATE_PATTERNS)
                 coverage_proxy = parse_count_from_text(clean_line, COVERAGE_PATTERNS)

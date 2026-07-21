@@ -141,7 +141,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - `exclusive.csv` (events found by exactly one fuzzer)
   - `throughput_samples.csv` (raw tx/s and gas/s samples recovered from logs when available)
   - `throughput_summary.csv` (per-fuzzer tx/s and gas/s distribution summary)
-  - `progress_metrics_samples.csv` (raw fuzzer-native progress metrics such as seq/s, coverage proxy, corpus size, favored items, failure rate when available)
+  - `progress_metrics_samples.csv` (fuzzer-native progress metrics such as seq/s, coverage proxy, corpus size, favored items, failure rate when available; Foundry worker-local pulses are aggregated into run-level cumulative accepted corpus entries and a summed worker-edge coverage proxy)
   - `progress_metrics_summary.csv` (per-fuzzer distribution summary of those progress metrics)
   - `differential_coverage_summary.csv` (human-readable baseline/feature verdicts computed from per-sample relscore statistics and relcov non-inferiority against baseline reliability)
   - `differential_coverage_statistics.json` (machine-readable verdict inputs, per-campaign test results, intervals, sample counts, and aggregate verdict)

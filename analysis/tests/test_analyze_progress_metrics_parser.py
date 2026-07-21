@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from analysis import analyze
+import numpy as np
+
+from analysis import analyze, benchmark_report
 
 
 class ProgressMetricsParserTests(unittest.TestCase):
@@ -91,12 +93,280 @@ class ProgressMetricsParserTests(unittest.TestCase):
         )
         self.assertEqual(len(samples), 2)
         self.assertEqual(samples[1].fuzzer, "foundry")
-        self.assertEqual(samples[1].source, "json-metrics")
+        self.assertEqual(samples[1].source, "json-metrics-aggregated")
         self.assertAlmostEqual(samples[1].elapsed_seconds, 5.0)
         self.assertAlmostEqual(samples[1].coverage_proxy, 259.0)
         self.assertAlmostEqual(samples[1].corpus_size, 65.0)
         self.assertAlmostEqual(samples[1].favored_items, 44.0)
         self.assertIsNone(samples[1].failure_rate)
+
+    def test_aggregates_interleaved_foundry_worker_pulses(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":50,"favored_items":30},"worker":{"id":0,"count":2}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":12,"corpus_count":7,"favored_items":4},"worker":{"id":1,"count":2}}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":55,"favored_items":32},"worker":{"id":0,"count":2}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [sample.coverage_proxy for sample in samples], [100.0, 112.0, 122.0]
+        )
+        self.assertEqual(
+            [sample.corpus_size for sample in samples], [50.0, 57.0, 62.0]
+        )
+        self.assertEqual(
+            [sample.favored_items for sample in samples], [30.0, 34.0, 36.0]
+        )
+
+    def test_orders_foundry_worker_pulses_by_timestamp_before_aggregation(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":100},"worker":{"id":0,"count":2}}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":110},"worker":{"id":0,"count":2}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":12,"corpus_count":12},"worker":{"id":1,"count":2}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(0.0, 100.0), (10.0, 122.0), (5.0, 112.0)],
+        )
+
+    def test_foundry_aggregation_keeps_first_json_timestamp_baseline(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"failure","contract":"Target"}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":50},"worker":{"id":0,"count":1}}',
+                '{"timestamp":115,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":55},"worker":{"id":0,"count":1}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(10.0, 50.0), (15.0, 55.0)],
+        )
+
+    def test_delayed_foundry_pulse_is_not_treated_as_counter_reset(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":100},"worker":{"id":0,"count":1}}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":110},"worker":{"id":0,"count":1}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":105,"corpus_count":105},"worker":{"id":0,"count":1}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(0.0, 100.0), (10.0, 110.0), (5.0, 105.0)],
+        )
+
+    def test_delayed_earliest_foundry_pulse_preserves_latest_summary(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":110},"worker":{"id":0,"count":1}}',
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":100},"worker":{"id":0,"count":1}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":105,"corpus_count":105},"worker":{"id":0,"count":1}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [
+                (sample.elapsed_seconds, sample.coverage_proxy, sample.corpus_size)
+                for sample in samples
+            ],
+            [
+                (10.0, 110.0, 110.0),
+                (0.0, 100.0, 100.0),
+                (5.0, 105.0, 105.0),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "progress_metrics_summary.csv"
+            analyze.write_progress_metrics_summary_csv(samples, summary_path)
+            with summary_path.open("r", newline="") as handle:
+                summary = next(csv.DictReader(handle))
+
+        self.assertEqual(float(summary["coverage_p50"]), 110.0)
+        self.assertEqual(float(summary["corpus_p50"]), 110.0)
+
+    def test_foundry_aggregation_preserves_raw_text_metric_order_and_timing(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"corpus_count":100},"worker":{"id":0,"count":2}}',
+                "corpus: 7",
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"corpus_count":110},"worker":{"id":0,"count":2}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"corpus_count":12},"worker":{"id":1,"count":2}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(0.0, 100.0), (0.0, 7.0), (10.0, 122.0), (5.0, 112.0)],
+        )
+
+    def test_unorderable_foundry_pulse_does_not_affect_aggregate(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"corpus_count":100},"worker":{"id":0,"count":1}}',
+                '{"event":"pulse","contract":"Target","metrics":{"corpus_count":50},"worker":{"id":0,"count":1}}',
+                '{"timestamp":"NaN","event":"pulse","contract":"Target","metrics":{"corpus_count":40},"worker":{"id":0,"count":1}}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"corpus_count":110},"worker":{"id":0,"count":1}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(0.0, 100.0), (0.0, 50.0), (0.0, 40.0), (10.0, 110.0)],
+        )
+
+    def test_foundry_pulses_without_valid_identity_remain_unaggregated(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":100}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":12,"corpus_count":12},"worker":{"id":"invalid","count":2}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [(sample.elapsed_seconds, sample.corpus_size) for sample in samples],
+            [(0.0, 100.0), (5.0, 12.0)],
+        )
+
+    def test_aggregates_foundry_contracts_and_counter_resets(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"First","metrics":{"cumulative_edges_seen":10,"corpus_count":5,"favored_items":3},"worker":{"id":0,"count":1}}',
+                '{"timestamp":105,"event":"pulse","contract":"Second","metrics":{"cumulative_edges_seen":20,"corpus_count":8,"favored_items":4},"worker":{"id":0,"count":1}}',
+                '{"timestamp":110,"event":"pulse","contract":"First","metrics":{"cumulative_edges_seen":2,"corpus_count":1,"favored_items":1},"worker":{"id":0,"count":1}}',
+            ]
+        )
+
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        self.assertEqual(
+            [sample.coverage_proxy for sample in samples], [10.0, 30.0, 32.0]
+        )
+        self.assertEqual(
+            [sample.corpus_size for sample in samples], [5.0, 13.0, 14.0]
+        )
+        self.assertEqual(
+            [sample.favored_items for sample in samples], [3.0, 7.0, 5.0]
+        )
+
+    def test_aggregated_foundry_counters_remain_monotonic_in_report_input(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":50},"worker":{"id":0,"count":2}}',
+                '{"timestamp":110,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":110,"corpus_count":55},"worker":{"id":0,"count":2}}',
+                '{"timestamp":105,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":12,"corpus_count":7},"worker":{"id":1,"count":2}}',
+            ]
+        )
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "progress_metrics_samples.csv"
+            analyze.write_progress_metrics_samples_csv(samples, csv_path)
+            sample_df = benchmark_report.load_metric_samples_csv(
+                csv_path, benchmark_report.PROGRESS_SAMPLE_VALUE_COLS
+            )
+            grid = np.sort(sample_df["time_hours"].unique())
+
+            for metric in ("coverage_proxy", "corpus_size"):
+                report_df = benchmark_report.resample_metric_samples_to_grid(
+                    sample_df, metric, grid
+                )
+                values = report_df[metric].dropna().to_numpy()
+                self.assertTrue(np.all(np.diff(values) >= 0))
+
+    def test_report_uses_final_foundry_counter_at_equal_timestamp(self):
+        log_path = self.write_log(
+            [
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":100,"corpus_count":100,"favored_items":30},"worker":{"id":0,"count":2}}',
+                '{"timestamp":100,"event":"pulse","contract":"Target","metrics":{"cumulative_edges_seen":12,"corpus_count":12,"favored_items":4},"worker":{"id":1,"count":2}}',
+            ]
+        )
+        samples = analyze.parse_progress_metrics_log(
+            log_path, "run-1", "i-1", "foundry-git-test"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "progress_metrics_samples.csv"
+            analyze.write_progress_metrics_samples_csv(samples, csv_path)
+            sample_df = benchmark_report.load_metric_samples_csv(
+                csv_path, [*benchmark_report.PROGRESS_SAMPLE_VALUE_COLS, "favored_items"]
+            )
+            grid = np.array([0.0])
+
+            coverage_df = benchmark_report.resample_metric_samples_to_grid(
+                sample_df, "coverage_proxy", grid
+            )
+            corpus_df = benchmark_report.resample_metric_samples_to_grid(
+                sample_df, "corpus_size", grid
+            )
+            favored_df = benchmark_report.resample_metric_samples_to_grid(
+                sample_df, "favored_items", grid
+            )
+
+            self.assertEqual(coverage_df["coverage_proxy"].tolist(), [112.0])
+            self.assertEqual(corpus_df["corpus_size"].tolist(), [112.0])
+            self.assertEqual(favored_df["favored_items"].tolist(), [32.0])
+
+            other_fuzzer_df = sample_df.copy()
+            other_fuzzer_df["fuzzer"] = "medusa"
+            other_coverage_df = benchmark_report.resample_metric_samples_to_grid(
+                other_fuzzer_df, "coverage_proxy", grid
+            )
+            self.assertEqual(other_coverage_df["coverage_proxy"].tolist(), [106.0])
+
+            raw_foundry_df = sample_df.copy()
+            raw_foundry_df["source"] = "json-metrics"
+            raw_coverage_df = benchmark_report.resample_metric_samples_to_grid(
+                raw_foundry_df, "coverage_proxy", grid
+            )
+            self.assertEqual(raw_coverage_df["coverage_proxy"].tolist(), [106.0])
+
+            legacy_coverage_df = benchmark_report.resample_metric_samples_to_grid(
+                raw_foundry_df.drop(columns="source"), "coverage_proxy", grid
+            )
+            self.assertEqual(legacy_coverage_df["coverage_proxy"].tolist(), [106.0])
 
     def test_writes_progress_metrics_summary_csv_with_latest_run_values(self):
         samples = [
