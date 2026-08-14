@@ -133,6 +133,7 @@ Optional controls include `EXCLUDE_FUZZERS`, `REPORT_BUDGET`, `REPORT_GRID_STEP_
   - Medusa: parse elapsed markers and failed assertions/properties from textual logs.
   - Echidna and Recon Fuzzer: parse falsification markers from textual logs.
   - Unknown fuzzers: fall back to generic pattern parsing.
+- Runner command logs and Foundry's post-benchmark showmap replay log are excluded from benchmark event, throughput, and progress extraction.
 - Event de-duplication is per run-instance stream (same event name counted once per run).
 - Outputs:
   - `events.csv` (raw event stream)

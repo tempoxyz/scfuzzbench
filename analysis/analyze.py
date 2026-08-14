@@ -28,7 +28,7 @@ class LogFile:
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
-IGNORED_LOG_FILENAMES = {"runner_commands.log"}
+IGNORED_LOG_FILENAMES = {"foundry_showmap.log", "runner_commands.log"}
 ABS_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} [0-9:.]+)\]")
 MEDUSA_ELAPSED_RE = re.compile(r"elapsed:\s*([0-9hms]+)")
 FOUNDATION_JSON_RE = re.compile(r"^\s*\{.*\}\s*$")
