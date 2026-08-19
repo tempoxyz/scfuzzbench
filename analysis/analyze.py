@@ -663,6 +663,14 @@ def extract_foundry_failure(payload: Dict[str, Any]) -> Tuple[Optional[str], Opt
         return None, None, None
 
     if str(payload.get("event") or "").strip() == "failure":
+        failure_type = str(payload.get("failure_type") or "").strip()
+        target = str(payload.get("target") or "").strip()
+        selector = str(payload.get("selector") or "").strip()
+        if failure_type == "handler_assertion" and target and selector:
+            # Current Foundry records handler failures as a target address and
+            # selector. The address alone collapses every assertion on a handler.
+            return f"{target}:{selector}", ts_value, "foundry-failure-event"
+
         # Prefer the per-invariant identity so distinct invariant failures are
         # counted as distinct bugs. The `target` field is the harness contract
         # (e.g. "CryticToFoundry"), which is identical across every invariant and
