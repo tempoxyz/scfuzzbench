@@ -25,9 +25,17 @@ class LogFile:
     path: Path
     instance_id: str
     fuzzer_label: str
+    run_id: Optional[str] = None
 
 LOG_FILE_RE = re.compile(r".+\.log$")
 INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
+# Matrix/aggregated benchmark runs are flattened by the workflows collector
+# (modules/tests.nu `scfuzzbench-collect-all-logs`) into a single per-target
+# directory. Each round's log files are renamed to "<run_id>-<original_name>",
+# where <run_id> is the safe-labeled path of that round's logs.zip and therefore
+# always ends in "logs.zip". Recovering this per-round prefix keeps multiple
+# rounds from collapsing into a single shared "unknown" run.
+MATRIX_RUN_PREFIX_RE = re.compile(r"^(?P<run_id>.*logs\.zip)-(?P<name>.+)$")
 IGNORED_LOG_FILENAMES = {"foundry_showmap.log", "runner_commands.log"}
 ABS_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} [0-9:.]+)\]")
 MEDUSA_ELAPSED_RE = re.compile(r"elapsed:\s*([0-9hms]+)")
@@ -1085,7 +1093,9 @@ def discover_log_files(logs_dir: Path) -> Tuple[LogFile, ...]:
             continue
         instance_label = rel.parts[0]
         instance_id, fuzzer_label = split_instance_label(instance_label)
-        files.append(LogFile(path, instance_id, fuzzer_label))
+        matrix_match = MATRIX_RUN_PREFIX_RE.match(path.name)
+        file_run_id = matrix_match.group("run_id") if matrix_match else None
+        files.append(LogFile(path, instance_id, fuzzer_label, file_run_id))
     return tuple(files)
 
 
@@ -1095,11 +1105,12 @@ def parse_logs(
     log_files: Sequence[LogFile],
 ) -> List[Event]:
     events: List[Event] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    fallback_run_id = run_id or infer_run_id(logs_dir) or "unknown"
     for log_file in log_files:
         path = log_file.path
         instance_id = log_file.instance_id
         fuzzer_label = log_file.fuzzer_label
+        run_id_value = run_id or log_file.run_id or fallback_run_id
         fuzzer = normalize_fuzzer(fuzzer_label)
         if fuzzer == "foundry":
             events.extend(parse_foundry_log(path, run_id_value, instance_id, fuzzer_label))
@@ -1140,8 +1151,9 @@ def parse_throughput_logs(
     log_files: Sequence[LogFile],
 ) -> List[ThroughputSample]:
     samples: List[ThroughputSample] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    fallback_run_id = run_id or infer_run_id(logs_dir) or "unknown"
     for log_file in log_files:
+        run_id_value = run_id or log_file.run_id or fallback_run_id
         samples.extend(
             parse_throughput_log(
                 log_file.path,
@@ -1292,8 +1304,9 @@ def parse_progress_metrics_logs(
     log_files: Sequence[LogFile],
 ) -> List[ProgressMetricsSample]:
     samples: List[ProgressMetricsSample] = []
-    run_id_value = run_id or infer_run_id(logs_dir) or "unknown"
+    fallback_run_id = run_id or infer_run_id(logs_dir) or "unknown"
     for log_file in log_files:
+        run_id_value = run_id or log_file.run_id or fallback_run_id
         samples.extend(
             parse_progress_metrics_log(
                 log_file.path,
