@@ -60,9 +60,9 @@ jobs:
           rm -rf "${topdir}" repo.tar.gz
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        uses: tempoxyz/gh-actions/actions/setup-terraform@487be2d19b0ba9ae1903143016444ab752c3e939
         with:
-          terraform_version: 1.5.7
+          version: 1.5.7
 
       - name: Terraform fmt
         run: terraform -chdir=infrastructure fmt -check -recursive
