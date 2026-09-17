@@ -180,12 +180,14 @@ on:
         description: "Benchmark UUID (derived from manifest)."
         value: ${{ jobs.benchmark-run.outputs.benchmark_uuid }}
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   benchmark-run:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       run_id: ${{ steps.tf_outputs.outputs.run_id }}
       benchmark_uuid: ${{ steps.tf_outputs.outputs.benchmark_uuid }}
@@ -193,6 +195,8 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:
