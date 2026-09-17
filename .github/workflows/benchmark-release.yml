@@ -26,13 +26,14 @@ on:
   schedule:
     - cron: "0 * * * *"
 
-permissions:
-  actions: write
-  contents: write
+permissions: {}
 
 jobs:
   discover:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       has_runs: ${{ steps.discover.outputs.has_runs }}
       matrix: ${{ steps.discover.outputs.matrix }}
@@ -40,6 +41,8 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Ensure AWS credentials are configured
         run: |
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
@@ -174,6 +177,9 @@ jobs:
     needs: discover
     if: ${{ needs.discover.outputs.has_runs == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
@@ -181,6 +187,8 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:
@@ -547,7 +555,13 @@ jobs:
     needs: [discover, release]
     if: ${{ needs.discover.outputs.has_runs == 'true' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Trigger docs refresh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

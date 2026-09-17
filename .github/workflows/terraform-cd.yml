@@ -21,16 +21,20 @@ on:
         required: false
         default: ""
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     environment: ${{ (inputs.action == 'apply' || inputs.action == 'destroy') && 'production' || 'plan' }}
     env:
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:

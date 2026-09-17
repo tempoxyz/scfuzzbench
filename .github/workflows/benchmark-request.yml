@@ -4,9 +4,7 @@ on:
   issues:
     types: [opened, edited, labeled]
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 concurrency:
   group: benchmark-request-${{ github.event.issue.number }}
@@ -15,6 +13,10 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
     outputs:
       is_request: ${{ steps.prepare.outputs.is_request }}
       should_run: ${{ steps.prepare.outputs.should_run }}
@@ -35,6 +37,8 @@ jobs:
       properties_path: ${{ steps.prepare.outputs.properties_path }}
       fuzzer_env_json: ${{ steps.prepare.outputs.fuzzer_env_json }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Parse and validate benchmark request
         id: prepare
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -454,6 +458,9 @@ jobs:
   benchmark-run:
     needs: prepare
     if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/benchmark-run.yml
     secrets: inherit
     with:
@@ -480,7 +487,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Comment result (and close on success)
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:

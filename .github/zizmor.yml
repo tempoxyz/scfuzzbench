@@ -1,0 +1,24 @@
+rules:
+  template-injection:
+    ignore:
+      # Existing benchmark workflows interpolate validated inputs and trusted
+      # matrix or step outputs into scripts. Keep those files baselined while
+      # continuing to scan new workflows for template injection.
+      - benchmark-release.yml
+      - benchmark-request.yml
+      - benchmark-run.yml
+  secrets-outside-env:
+    ignore:
+      # These existing automation workflows intentionally consume repository
+      # secrets without a GitHub deployment environment.
+      - benchmark-release.yml
+      - benchmark-run.yml
+      - docs.yml
+  secrets-inherit:
+    ignore:
+      # The local benchmark runner needs the repository's AWS and Terraform
+      # secrets and is pinned to the caller's own revision.
+      - benchmark-request.yml
+  ref-version-mismatch:
+    # Tempo's internal actions use immutable pins without matching semver tags.
+    disable: true
