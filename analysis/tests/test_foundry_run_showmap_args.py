@@ -152,7 +152,7 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
             corpus_idx = replay_args.index("--showmap-corpus-dir")
             self.assertEqual(replay_args[corpus_idx + 1], str(corpus_dir))
 
-    def test_showmap_replay_uses_bounded_default_timeout(self):
+    def test_showmap_replay_scales_timeout_with_fuzz_budget(self):
         def run_case(timeout: str, override: str | None = None) -> list[list[str]]:
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_dir = Path(tmp)
@@ -179,14 +179,16 @@ class FoundryRunShowmapArgsTests(unittest.TestCase):
                 lines = (log_dir / "commands.tsv").read_text(encoding="utf-8").splitlines()
                 return [line.split("\t") for line in lines]
 
+        # Replay budget scales with the fuzz budget, not a fixed cap.
         long_campaign = run_case("86400")
         self.assertEqual(long_campaign[0][1], "86400")
-        self.assertEqual(long_campaign[1][1], "1800")
+        self.assertEqual(long_campaign[1][1], "86400")
 
         short_campaign = run_case("60")
         self.assertEqual(short_campaign[0][1], "60")
         self.assertEqual(short_campaign[1][1], "60")
 
+        # Explicit override still wins.
         explicit_override = run_case("86400", "42")
         self.assertEqual(explicit_override[0][1], "86400")
         self.assertEqual(explicit_override[1][1], "42")
