@@ -20,7 +20,7 @@ INSTANCE_PREFIX_RE = re.compile(r"^(i-[0-9a-f]+)-(.*)$")
 # per-round prefix so zero-event seeding produces one entry per round instead of
 # collapsing every round into a single "unknown" run. Mirrors analyze.py.
 MATRIX_RUN_PREFIX_RE = re.compile(r"^(?P<run_id>.*logs\.zip)-(?P<name>.+)$")
-IGNORED_LOG_FILENAMES = {"runner_commands.log"}
+IGNORED_LOG_FILENAMES = {"foundry_showmap.log", "runner_commands.log"}
 
 
 def die(msg: str) -> None:
