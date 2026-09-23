@@ -42,7 +42,7 @@ jobs:
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@27b9d9cb079918e6be16c8660f82bb0cf7fef6ea
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
       - name: Ensure AWS credentials are configured
         run: |
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
@@ -59,7 +59,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials (keys)
-        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@487be2d19b0ba9ae1903143016444ab752c3e939
+        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -188,7 +188,7 @@ jobs:
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@27b9d9cb079918e6be16c8660f82bb0cf7fef6ea
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:
@@ -205,7 +205,7 @@ jobs:
           rm -rf "${topdir}" repo.tar.gz
 
       - name: Configure AWS credentials (keys)
-        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@487be2d19b0ba9ae1903143016444ab752c3e939
+        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -227,7 +227,7 @@ jobs:
 
       - name: Setup Python
         if: ${{ steps.release_check.outputs.exists != 'true' || inputs.force_reanalyze == 'true' }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
@@ -561,7 +561,7 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@27b9d9cb079918e6be16c8660f82bb0cf7fef6ea
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
       - name: Trigger docs refresh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
