@@ -34,7 +34,7 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:
@@ -51,7 +51,7 @@ jobs:
           rm -rf "${topdir}" repo.tar.gz
 
       - name: Setup Terraform
-        uses: tempoxyz/gh-actions/actions/setup-terraform@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+        uses: tempoxyz/gh-actions/actions/setup-terraform@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: 1.5.7
 
@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials (keys)
-        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
