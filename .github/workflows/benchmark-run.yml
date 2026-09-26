@@ -196,7 +196,7 @@ jobs:
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
       - name: Checkout (tarball)
         timeout-minutes: 5
         env:
@@ -214,7 +214,7 @@ jobs:
 
       - name: Setup Terraform
         if: ${{ !inputs.dry_run }}
-        uses: tempoxyz/gh-actions/actions/setup-terraform@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
+        uses: tempoxyz/gh-actions/actions/setup-terraform@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
         with:
           version: 1.5.7
 
@@ -236,7 +236,7 @@ jobs:
 
       - name: Configure AWS credentials (keys)
         if: ${{ !inputs.dry_run }}
-        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
+        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
