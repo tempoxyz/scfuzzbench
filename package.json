@@ -2,12 +2,16 @@
   "name": "scfuzzbench",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0",
+    "npm": ">=11.19.0"
+  },
   "scripts": {
     "docs:dev": "vitepress dev docs --host 0.0.0.0",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs --host 0.0.0.0"
   },
   "devDependencies": {
-    "vitepress": "1.6.4"
+    "vitepress": "2.0.0-alpha.20"
   }
 }

@@ -41,7 +41,7 @@ jobs:
         uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
       - name: Parse and validate benchmark request
         id: prepare
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const owner = context.repo.owner;
@@ -462,7 +462,12 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/benchmark-run.yml
-    secrets: inherit
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
+      TF_BACKEND_CONFIG: ${{ secrets.TF_BACKEND_CONFIG }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     with:
       target_repo_url: ${{ needs.prepare.outputs.target_repo_url }}
       target_commit: ${{ needs.prepare.outputs.target_commit }}
@@ -492,7 +497,11 @@ jobs:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
       - name: Comment result (and close on success)
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BENCHMARK_RESULT: ${{ needs['benchmark-run'].result }}
+          RUN_ID: ${{ needs['benchmark-run'].outputs.run_id }}
+          BENCHMARK_UUID: ${{ needs['benchmark-run'].outputs.benchmark_uuid }}
         with:
           script: |
             const owner = context.repo.owner;
@@ -538,7 +547,7 @@ jobs:
               await github.rest.issues.setLabels({ owner, repo, issue_number, labels: want });
             }
 
-            const result = "${{ needs['benchmark-run'].result }}";
+            const result = process.env.BENCHMARK_RESULT;
             if (result !== "success") {
               await setStatusLabel(LABEL_VALIDATED);
               await upsertBotComment(
@@ -553,8 +562,8 @@ jobs:
               return;
             }
 
-            const run_id = "${{ needs['benchmark-run'].outputs.run_id }}";
-            const benchmark_uuid = "${{ needs['benchmark-run'].outputs.benchmark_uuid }}";
+            const run_id = process.env.RUN_ID;
+            const benchmark_uuid = process.env.BENCHMARK_UUID;
             const docsUrl = `https://scfuzzbench.com/runs/${run_id}/${benchmark_uuid}/`;
 
             await upsertBotComment(

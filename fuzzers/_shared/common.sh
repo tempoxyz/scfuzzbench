@@ -484,6 +484,7 @@ install_base_packages() {
     ca-certificates \
     curl \
     git \
+    gnupg \
     jq \
     tar \
     zip \
@@ -500,6 +501,13 @@ install_base_packages() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     curl -sSfL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "${tmp_dir}/awscliv2.zip"
+    curl -sSfL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip.sig" -o "${tmp_dir}/awscliv2.zip.sig"
+    # Only trust AWS's documented CLI signing key, in an isolated keyring.
+    mkdir -m 0700 "${tmp_dir}/gnupg"
+    gpg --batch --homedir "${tmp_dir}/gnupg" --keyserver hkps://keyserver.ubuntu.com \
+      --recv-keys FB5DB77FD5C118B80511ADA8A6310ACC4672475C
+    gpg --batch --homedir "${tmp_dir}/gnupg" --verify \
+      "${tmp_dir}/awscliv2.zip.sig" "${tmp_dir}/awscliv2.zip"
     unzip -q "${tmp_dir}/awscliv2.zip" -d "${tmp_dir}"
     "${tmp_dir}/aws/install" --update
     rm -rf "${tmp_dir}"
@@ -513,10 +521,30 @@ ensure_uv() {
     return 0
   fi
 
-  log "Installing uv"
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="${HOME}/.local/bin:${PATH}"
+  log "Installing uv 0.12.17"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  download_verified \
+    "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-x86_64-unknown-linux-gnu.tar.gz" \
+    "${tmp_dir}/uv.tar.gz" \
+    "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63"
+  tar -xzf "${tmp_dir}/uv.tar.gz" -C "${tmp_dir}"
+  install -m 0755 "${tmp_dir}/uv-x86_64-unknown-linux-gnu/uv" "${SCFUZZBENCH_BIN_DIR}/uv"
+  install -m 0755 "${tmp_dir}/uv-x86_64-unknown-linux-gnu/uvx" "${SCFUZZBENCH_BIN_DIR}/uvx"
+  rm -rf "${tmp_dir}"
   command -v uv >/dev/null
+}
+
+# Verify before extracting or executing downloaded code. Custom fuzzer versions
+# must supply their matching SHA-256 through the existing fuzzer environment map.
+download_verified() {
+  local url=$1 destination=$2 sha256=$3
+  if [[ ! "${sha256}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    log "A SHA-256 checksum is required for ${url}"
+    return 1
+  fi
+  curl --fail --show-error --silent --location --retry 3 "${url}" -o "${destination}"
+  printf '%s  %s\n' "${sha256}" "${destination}" | sha256sum --check --strict
 }
 
 install_foundry() {
@@ -531,7 +559,16 @@ install_foundry() {
     local foundry_rust_toolchain="${FOUNDRY_RUST_TOOLCHAIN:-1.96.0}"
     if ! command -v rustup >/dev/null 2>&1; then
       log "Installing Rust toolchain manager"
-      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      local rustup_dir
+      rustup_dir=$(mktemp -d)
+      # Digest published by rust-lang/docker-rust for rustup 1.29.1, amd64.
+      download_verified \
+        "https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init" \
+        "${rustup_dir}/rustup-init" \
+        "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71"
+      chmod +x "${rustup_dir}/rustup-init"
+      "${rustup_dir}/rustup-init" -y --profile minimal --default-toolchain none
+      rm -rf "${rustup_dir}"
     fi
     # shellcheck source=/dev/null
     source "${HOME}/.cargo/env"
@@ -566,9 +603,19 @@ install_foundry() {
     if ! is_local_mode; then
       export HOME=/root
     fi
-    curl -L https://foundry.paradigm.xyz | bash
-    export PATH="${HOME}/.foundry/bin:${PATH}"
-    "${HOME}/.foundry/bin/foundryup" -i "${FOUNDRY_VERSION}"
+    local tmp_dir sha256="${FOUNDRY_SHA256:-}"
+    tmp_dir=$(mktemp -d)
+    if [[ -z "${sha256}" && "${FOUNDRY_VERSION}" == "v1.6.0-rc1" ]]; then
+      sha256="2e4378e23e93c35d938bd6faeeff8bc48aa5faf081033a9235309172bfb76d5f"
+    fi
+    download_verified \
+      "https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz" \
+      "${tmp_dir}/foundry.tar.gz" "${sha256}"
+    tar -xzf "${tmp_dir}/foundry.tar.gz" -C "${tmp_dir}"
+    install -m 0755 "${tmp_dir}/forge" "${SCFUZZBENCH_BIN_DIR}/forge"
+    install -m 0755 "${tmp_dir}/cast" "${SCFUZZBENCH_BIN_DIR}/cast"
+    install -m 0755 "${tmp_dir}/anvil" "${SCFUZZBENCH_BIN_DIR}/anvil"
+    rm -rf "${tmp_dir}"
     forge --version
   fi
   log_duration "install_foundry" "${install_start}"
@@ -579,7 +626,7 @@ install_crytic_compile() {
   install_start=$(now_epoch_seconds)
   log "Installing crytic-compile"
   ensure_uv
-  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force crytic-compile
+  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force --no-build --exclude-newer 7d crytic-compile==0.4.2
   command -v crytic-compile
   log_duration "install_crytic_compile" "${install_start}"
 }
@@ -589,7 +636,7 @@ install_slither_analyzer() {
   install_start=$(now_epoch_seconds)
   log "Installing slither-analyzer"
   ensure_uv
-  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force slither-analyzer
+  UV_TOOL_BIN_DIR="${SCFUZZBENCH_BIN_DIR}" uv tool install --force --no-build --exclude-newer 7d slither-analyzer==0.11.6
   command -v slither
   log_duration "install_slither_analyzer" "${install_start}"
 }
