@@ -184,6 +184,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     env:
+      BENCHMARK_UUID: ${{ matrix.benchmark_uuid }}
+      RUN_ID: ${{ matrix.run_id }}
+      TIMEOUT_HOURS: ${{ matrix.timeout_hours }}
       AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
       SCFUZZBENCH_BUCKET: ${{ secrets.SCFUZZBENCH_BUCKET }}
     steps:
@@ -211,13 +214,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Validate release identifiers
+        run: |
+          set -euo pipefail
+          for identifier in "${BENCHMARK_UUID}" "${RUN_ID}"; do
+            if [[ ! "${identifier}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]]; then
+              echo "Invalid benchmark UUID or run ID" >&2
+              exit 1
+            fi
+          done
+
       - name: Check for existing release
         id: release_check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="scfuzzbench-${{ matrix.benchmark_uuid }}-${{ matrix.run_id }}"
+          tag="scfuzzbench-${BENCHMARK_UUID}-${RUN_ID}"
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "exists=true" >> "${GITHUB_OUTPUT}"
           else
@@ -227,7 +240,7 @@ jobs:
 
       - name: Setup Python
         if: ${{ steps.release_check.outputs.exists != 'true' || inputs.force_reanalyze == 'true' }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
@@ -242,11 +255,11 @@ jobs:
           REPORT_BUDGET_HOURS: ${{ matrix.report_budget_hours }}
         run: |
           set -euo pipefail
-          dest_root="${GITHUB_WORKSPACE}/analysis-artifacts/${{ matrix.run_id }}"
+          dest_root="${GITHUB_WORKSPACE}/analysis-artifacts/${RUN_ID}"
           analysis_dir="${dest_root}/analysis"
           mkdir -p "${analysis_dir}"
-          logs_manifest_key="logs/${{ matrix.run_id }}/${{ matrix.benchmark_uuid }}/manifest.json"
-          runs_manifest_key="runs/${{ matrix.run_id }}/${{ matrix.benchmark_uuid }}/manifest.json"
+          logs_manifest_key="logs/${RUN_ID}/${BENCHMARK_UUID}/manifest.json"
+          runs_manifest_key="runs/${RUN_ID}/${BENCHMARK_UUID}/manifest.json"
           if aws s3 cp "s3://${SCFUZZBENCH_BUCKET}/${logs_manifest_key}" "${analysis_dir}/manifest.json"; then
             echo "Fetched manifest from ${logs_manifest_key}"
           else
@@ -254,7 +267,7 @@ jobs:
             echo "Fetched manifest from ${runs_manifest_key}"
           fi
 
-          timeout_hours="${{ matrix.timeout_hours }}"
+          timeout_hours="${TIMEOUT_HOURS}"
           if [[ -z "${timeout_hours}" || "${timeout_hours}" == "null" ]]; then
             timeout_hours=$(ANALYSIS_DIR="${analysis_dir}" python3 - <<'PY'
           import json
@@ -298,10 +311,13 @@ jobs:
 
       - name: Collect analysis artifacts
         if: ${{ steps.release_check.outputs.exists != 'true' || inputs.force_reanalyze == 'true' }}
+        env:
+          DEST_ROOT: ${{ steps.manifest.outputs.dest_root }}
+          ANALYSIS_DIR: ${{ steps.manifest.outputs.analysis_dir }}
         run: |
           set -euo pipefail
-          dest_root="${{ steps.manifest.outputs.dest_root }}"
-          analysis_dir="${{ steps.manifest.outputs.analysis_dir }}"
+          dest_root="${DEST_ROOT}"
+          analysis_dir="${ANALYSIS_DIR}"
 
           # Website + release notes expect these at the top-level.
           cp "${dest_root}/data/REPORT.md" "${analysis_dir}/REPORT.md"
@@ -362,10 +378,13 @@ jobs:
       - name: Build release bundles
         if: ${{ steps.release_check.outputs.exists != 'true' || inputs.force_reanalyze == 'true' }}
         id: bundles
+        env:
+          DEST_ROOT: ${{ steps.manifest.outputs.dest_root }}
+          ANALYSIS_DIR: ${{ steps.manifest.outputs.analysis_dir }}
         run: |
           set -euo pipefail
-          dest_root="${{ steps.manifest.outputs.dest_root }}"
-          analysis_dir="${{ steps.manifest.outputs.analysis_dir }}"
+          dest_root="${DEST_ROOT}"
+          analysis_dir="${ANALYSIS_DIR}"
           release_dir="${dest_root}/release"
           mkdir -p "${release_dir}"
 
@@ -389,11 +408,16 @@ jobs:
 
       - name: Upload analysis artifacts to S3
         if: ${{ steps.release_check.outputs.exists != 'true' || inputs.force_reanalyze == 'true' }}
+        env:
+          ANALYSIS_DIR: ${{ steps.manifest.outputs.analysis_dir }}
+          RELEASE_DIR: ${{ steps.bundles.outputs.release_dir }}
+          HAS_LOGS_ZIP: ${{ steps.bundles.outputs.has_logs_zip }}
+          HAS_CORPUS_ZIP: ${{ steps.bundles.outputs.has_corpus_zip }}
         run: |
           set -euo pipefail
-          analysis_dir="${{ steps.manifest.outputs.analysis_dir }}"
-          release_dir="${{ steps.bundles.outputs.release_dir }}"
-          s3_prefix="analysis/${{ matrix.benchmark_uuid }}/${{ matrix.run_id }}"
+          analysis_dir="${ANALYSIS_DIR}"
+          release_dir="${RELEASE_DIR}"
+          s3_prefix="analysis/${BENCHMARK_UUID}/${RUN_ID}"
 
           aws s3 cp "${analysis_dir}/REPORT.md" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/REPORT.md" --content-type text/markdown
           aws s3 cp "${analysis_dir}/bugs_over_time.png" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/bugs_over_time.png" --content-type image/png
@@ -447,27 +471,31 @@ jobs:
           aws s3 cp "${analysis_dir}/manifest.json" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/manifest.json" --content-type application/json
 
           aws s3 cp "${release_dir}/analysis.zip" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/bundles/analysis.zip" --content-type application/zip
-          if [[ "${{ steps.bundles.outputs.has_logs_zip }}" == "true" ]]; then
+          if [[ "${HAS_LOGS_ZIP}" == "true" ]]; then
             aws s3 cp "${release_dir}/logs.zip" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/bundles/logs.zip" --content-type application/zip
           fi
-          if [[ "${{ steps.bundles.outputs.has_corpus_zip }}" == "true" ]]; then
+          if [[ "${HAS_CORPUS_ZIP}" == "true" ]]; then
             aws s3 cp "${release_dir}/corpus.zip" "s3://${SCFUZZBENCH_BUCKET}/${s3_prefix}/bundles/corpus.zip" --content-type application/zip
           fi
 
       - name: Compose release body
         if: ${{ steps.release_check.outputs.exists != 'true' }}
         id: body
+        env:
+          ANALYSIS_DIR: ${{ steps.manifest.outputs.analysis_dir }}
+          HAS_LOGS_ZIP: ${{ steps.bundles.outputs.has_logs_zip }}
+          HAS_CORPUS_ZIP: ${{ steps.bundles.outputs.has_corpus_zip }}
         run: |
           set -euo pipefail
-          analysis_dir="${{ steps.manifest.outputs.analysis_dir }}"
+          analysis_dir="${ANALYSIS_DIR}"
           report_path="${analysis_dir}/REPORT.md"
           release_body="${analysis_dir}/RELEASE.md"
           cp "${report_path}" "${release_body}"
 
           base_url="https://${SCFUZZBENCH_BUCKET}.s3.${AWS_REGION}.amazonaws.com"
-          analysis_base="${base_url}/analysis/${{ matrix.benchmark_uuid }}/${{ matrix.run_id }}"
-          logs_base="${base_url}/logs/${{ matrix.run_id }}/${{ matrix.benchmark_uuid }}"
-          corpus_base="${base_url}/corpus/${{ matrix.run_id }}/${{ matrix.benchmark_uuid }}"
+          analysis_base="${base_url}/analysis/${BENCHMARK_UUID}/${RUN_ID}"
+          logs_base="${base_url}/logs/${RUN_ID}/${BENCHMARK_UUID}"
+          corpus_base="${base_url}/corpus/${RUN_ID}/${BENCHMARK_UUID}"
           bundles_base="${analysis_base}/bundles"
 
           {
@@ -528,14 +556,14 @@ jobs:
             echo "- Runner resource usage (Markdown): ${analysis_base}/runner_resource_usage.md"
             echo "- Runner resource summary (CSV): ${analysis_base}/runner_resource_summary.csv"
             echo "- Runner resource timeseries (CSV): ${analysis_base}/runner_resource_timeseries.csv"
-            if [[ "${{ steps.bundles.outputs.has_logs_zip }}" == "true" ]]; then
+            if [[ "${HAS_LOGS_ZIP}" == "true" ]]; then
               echo "- Logs bundle: ${bundles_base}/logs.zip"
             fi
-            if [[ "${{ steps.bundles.outputs.has_corpus_zip }}" == "true" ]]; then
+            if [[ "${HAS_CORPUS_ZIP}" == "true" ]]; then
               echo "- Corpus bundle: ${bundles_base}/corpus.zip"
             fi
             echo "- Raw logs prefix: ${logs_base}/"
-            if [[ "${{ steps.bundles.outputs.has_corpus_zip }}" == "true" ]]; then
+            if [[ "${HAS_CORPUS_ZIP}" == "true" ]]; then
               echo "- Raw corpus prefix: ${corpus_base}/"
             fi
           } >> "${release_body}"
@@ -546,10 +574,11 @@ jobs:
         if: ${{ steps.release_check.outputs.exists != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release_check.outputs.tag }}
+          RELEASE_BODY: ${{ steps.body.outputs.release_body }}
         run: |
           set -euo pipefail
-          tag="${{ steps.release_check.outputs.tag }}"
-          gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${tag}" --notes-file "${{ steps.body.outputs.release_body }}"
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --notes-file "${RELEASE_BODY}"
 
   refresh_docs:
     needs: [discover, release]

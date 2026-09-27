@@ -16,7 +16,11 @@ tmp_dir=$(mktemp -d)
 archive="echidna-${ECHIDNA_VERSION}-x86_64-linux.tar.gz"
 url="https://github.com/crytic/echidna/releases/download/v${ECHIDNA_VERSION}/${archive}"
 
-curl -L "${url}" -o "${tmp_dir}/${archive}"
+sha256="${ECHIDNA_SHA256:-}"
+if [[ -z "${sha256}" && "${ECHIDNA_VERSION}" == "2.3.1" ]]; then
+  sha256="64a7d65a0bea6051f76f551d9838f6f8e82148436929468224e1fdda268fd51d"
+fi
+download_verified "${url}" "${tmp_dir}/${archive}" "${sha256}"
 mkdir -p "${tmp_dir}/echidna"
 tar -xzf "${tmp_dir}/${archive}" -C "${tmp_dir}/echidna"
 

@@ -61,3 +61,29 @@ For all technical/operational details, use the docs site pages:
 - Target onboarding skill (machine-oriented): `skills/target-onboarding/SKILL.md`
 
 Rendered docs navigation and run/benchmark pages are available under `docs/`.
+
+## Dependency maintenance
+
+Use Node.js 24 and npm 11.19 or newer for the docs site. `npm ci` installs the
+locked dependencies with lifecycle scripts disabled; `npm run docs:build` checks
+the site. VitePress is pinned to `2.0.0-alpha.20` because the latest 1.x release
+still depends on vulnerable Vite/esbuild versions. No dependency overrides are used.
+
+The analysis environment requires Python 3.11 or newer. Edit
+`analysis/requirements.in`, then regenerate the pinned, hashed requirements:
+
+```sh
+uv pip compile analysis/requirements.in --python-version 3.11 --no-build \
+  --exclude-newer 7d --generate-hashes --upgrade -o analysis/requirements.txt
+uv run --python 3.11 --no-build --with-requirements analysis/requirements.txt \
+  python -m unittest discover -s analysis/tests
+```
+
+Fuzzer release archives are verified before extraction. The default Echidna,
+Medusa, Recon, and binary Foundry versions have SHA-256 digests pinned in their
+installers. When selecting another version, provide its verified `ECHIDNA_SHA256`,
+`MEDUSA_SHA256`, `RECON_SHA256`, or `FOUNDRY_SHA256` using the existing fuzzer
+environment map (or environment variables for local runs). Obtain the digest from
+the upstream release and review it before running; a missing or mismatched digest
+fails installation. Foundry source builds continue to use the requested Git ref
+and `cargo build --locked`.
