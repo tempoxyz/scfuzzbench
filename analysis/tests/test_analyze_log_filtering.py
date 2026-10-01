@@ -7,6 +7,26 @@ from analysis.events_to_cumulative import build_cumulative_rows
 
 
 class AnalyzeLogFilteringTests(unittest.TestCase):
+    def test_cumulative_inventory_ignores_foundry_showmap_replay(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            instance_dir = logs_dir / "i-abcd1234-foundry-git-test"
+            instance_dir.mkdir(parents=True)
+            (instance_dir / "foundry_showmap.log").write_text(
+                '{"timestamp":1000,"event":"failure",'
+                '"invariant":"replay_only_failure",'
+                '"target":"CryticToFoundry"}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(analyze.discover_log_files(logs_dir), ())
+            self.assertEqual(
+                build_cumulative_rows(
+                    [], include_zero=True, logs_dir=logs_dir, run_id="run-1"
+                ),
+                [],
+            )
+
     def test_foundry_showmap_replay_is_not_parsed_as_benchmark_data(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             logs_dir = Path(tmp_dir)
