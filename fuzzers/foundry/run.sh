@@ -137,9 +137,14 @@ if [[ "${showmap_enabled}" == "1" || "${showmap_enabled_lc}" == "true" || "${sho
   original_timeout="${SCFUZZBENCH_TIMEOUT_SECONDS:-}"
   showmap_timeout="${SCFUZZBENCH_FOUNDRY_SHOWMAP_TIMEOUT_SECONDS:-}"
   if [[ -z "${showmap_timeout}" ]]; then
-    showmap_timeout=1800
-    if [[ "${original_timeout}" =~ ^[0-9]+$ ]] && [[ "${original_timeout}" -gt 0 ]] && [[ "${original_timeout}" -lt "${showmap_timeout}" ]]; then
+    # Replay cost grows with corpus size, which grows with the fuzz budget, so
+    # scale the budget rather than capping it: a fixed cap silently truncated
+    # the replay on slow targets and dropped their coverage. Replay is normally
+    # far faster than fuzzing, so the ceiling is only reached by slow targets.
+    if [[ "${original_timeout}" =~ ^[0-9]+$ ]] && [[ "${original_timeout}" -gt 0 ]]; then
       showmap_timeout="${original_timeout}"
+    else
+      showmap_timeout=1800
     fi
   fi
   SCFUZZBENCH_TIMEOUT_SECONDS="${showmap_timeout}"
