@@ -13,5 +13,11 @@
   },
   "devDependencies": {
     "vitepress": "2.0.0-alpha.20"
+  },
+  "overrides": {
+    "vite": {
+      ".": "8.3.3",
+      "rolldown": "1.2.11"
+    }
   }
 }
